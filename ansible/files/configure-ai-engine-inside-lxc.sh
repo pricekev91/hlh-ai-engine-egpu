@@ -59,14 +59,20 @@ apt-get install -y --no-install-recommends cuda-nvcc-11-8 cuda-cudart-11-8 cuda-
 apt-get download cuda-toolkit-${CUDA_MAJOR} 2>&1 | head -n 20
 # Ensure nvidia libs match host driver 470.256.02 (not 535) - use real .1 package, not transitional .5
 apt-get install -y --allow-downgrades libnvidia-compute-470=470.256.02-0ubuntu0.24.04.1 2>&1 | tail -n 20 || true
-apt-get install -y --no-install-recommends nvidia-utils-470=470.256.02-0ubuntu0.24.04.1 2>&1 | tail -n 20 || apt-get install -y --no-install-recommends nvidia-utils-470 2>&1 | tail -n 20 || true
-# Fix libnvidia-ml symlink to 470 (apt may leave it at 535)
-if [ -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.470.256.02 ]; then
-  ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 2>&1 | head -n 5 || true
-  ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so 2>&1 | head -n 5 || true
-  ldconfig 2>&1 | head -n 5 || true
+apt-get install -y --no-install-recommends nvidia-utils-470=470.256.02-0ubuntu0.24.04.1 2>&1 | tail -n 20 || true
+# Host driver provides /dev/nvidia* but LXC needs userspace nvidia-smi + libnvidia-ml 470
+# The 470 deb on noble leaves a broken symlink /usr/bin/nvidia-smi -> /usr/lib/nvidia-470/bin/nvidia-smi (non-existent)
+# and libnvidia-ml.so.1 -> 535. Fix both by using host's binary pushed to /tmp/nvidia-smi
+if [ -x /tmp/nvidia-smi ]; then
+  rm -f /usr/bin/nvidia-smi
+  cp /tmp/nvidia-smi /usr/bin/nvidia-smi
+  chmod +x /usr/bin/nvidia-smi
 fi
-# Also ensure 535 libs are not shadowing 470
+if [ -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.470.256.02 ]; then
+  ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1
+  ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so
+  ldconfig
+fi
 apt-mark hold libnvidia-compute-535 nvidia-utils-535 2>&1 | head -n 5 || true
 
 # Ensure nvidia libs visible
@@ -74,9 +80,6 @@ export PATH=/usr/local/cuda/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
 echo 'export PATH=/usr/local/cuda/bin:$PATH' > /etc/profile.d/cuda.sh
 echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}' >> /etc/profile.d/cuda.sh
-# Fix nvidia-smi to use 470 (host driver 470.256.02, not 535)
-update-alternatives --set nvidia  /usr/lib/nvidia-470/bin/nvidia-smi 2>&1 | head -n 5 || update-alternatives --auto nvidia 2>&1 | head -n 5 || true
-ln -sf /usr/lib/nvidia-470/bin/nvidia-smi /usr/bin/nvidia-smi 2>&1 | head -n 5 || true
 
 # Groups for GPU (nvidia)
 usermod -aG render root || true
