@@ -106,11 +106,15 @@ fi
 # Ensure PATH includes CUDA
 export PATH=/usr/local/cuda/bin:${PATH:-}
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
+# Use set +o pipefail for nvidia-smi | head to avoid SIGPIPE with pipefail
+set +o pipefail
 nvidia-smi -L 2>&1 | head -20 || { echo "ERROR: nvidia-smi failed. Check /dev/nvidia* passthrough (c 195:*, c 511:*)." ; ls -l /dev/nvidia* 2>&1 | head -20; ls -l /usr/bin/nvidia-smi* 2>&1 | head -n 20; exit 1; }
+set -o pipefail
 echo "  nvidia-smi -L:"
 nvidia-smi -L
 echo "  Checking both GK210 chips (expect 2 GPUs):"
 GPU_COUNT=$(nvidia-smi -L 2>&1 | grep -c "GPU [0-9]:" || true)
+set +o pipefail
 if [ "$GPU_COUNT" -ne 2 ]; then echo "WARNING: Expected 2 K80 GPUs, found $GPU_COUNT" >&2; fi
 nvcc --version 2>&1 | head -5 || echo "nvcc not yet in PATH"
 echo "  Pinned: CUDA $CUDA_REPO_VERSION + driver $NVIDIA_DRIVER_VERSION (cc $CUDA_ARCH)"
