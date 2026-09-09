@@ -101,7 +101,7 @@ DefaultDependencies=no
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c '/sbin/modprobe nvidia || true; /sbin/modprobe nvidia_uvm || true; /sbin/modprobe nvidia_modeset || true; /sbin/modprobe nvidia_drm || true; /usr/bin/nvidia-modprobe -u -c 0 || true; /bin/mknod -m 666 /dev/nvidia-uvm c 507 0 2>/dev/null || /bin/chmod 666 /dev/nvidia-uvm 2>/dev/null || true; /bin/mknod -m 666 /dev/nvidia-uvm-tools c 507 1 2>/dev/null || /bin/chmod 666 /dev/nvidia-uvm-tools 2>/dev/null || true; /bin/mknod -m 666 /dev/nvidia-modeset c 195 254 2>/dev/null || /bin/chmod 666 /dev/nvidia-modeset 2>/dev/null || true; ls -l /dev/nvidia* 2>&1 | head -n 20'
+ExecStart=/bin/sh -c 'set -e; /sbin/modprobe nvidia || true; /sbin/modprobe nvidia_uvm || true; /sbin/modprobe nvidia_modeset || true; /sbin/modprobe nvidia_drm || true; /usr/bin/nvidia-modprobe -u -c 0 || true; UVM_MAJOR=$(grep -m1 nvidia-uvm /proc/devices 2>/dev/null | awk "{print $1}"); [ -n "$UVM_MAJOR" ] || UVM_MAJOR=511; if [ ! -c /dev/nvidia-uvm ]; then /bin/mknod -m 666 /dev/nvidia-uvm c $UVM_MAJOR 0 2>/dev/null || true; fi; if [ ! -c /dev/nvidia-uvm-tools ]; then /bin/mknod -m 666 /dev/nvidia-uvm-tools c $UVM_MAJOR 1 2>/dev/null || true; fi; /bin/chmod 666 /dev/nvidia-uvm /dev/nvidia-uvm-tools 2>/dev/null || true; /bin/mknod -m 666 /dev/nvidia-modeset c 195 254 2>/dev/null || /bin/chmod 666 /dev/nvidia-modeset 2>/dev/null || true; ls -l /dev/nvidia* 2>&1 | head -n 20'
 
 [Install]
 WantedBy=multi-user.target
@@ -110,12 +110,14 @@ SVC
 			systemctl enable nvidia-uvm-devices.service >/dev/null 2>&1 || true
 		fi
 		systemctl start nvidia-uvm-devices.service >/dev/null 2>&1 || true
-		# Ensure devices exist now (host reboot left them missing)
+		# Ensure devices exist now (host reboot left them missing) — dynamic major
 		/sbin/modprobe nvidia_uvm 2>/dev/null || true
 		/usr/bin/nvidia-modprobe -u -c 0 2>/dev/null || true
-		[ -c /dev/nvidia-uvm ] || mknod -m 666 /dev/nvidia-uvm c 507 0 2>/dev/null || true
-		[ -c /dev/nvidia-uvm-tools ] || mknod -m 666 /dev/nvidia-uvm-tools c 507 1 2>/dev/null || true
+		UVM_MAJOR=$(grep -m1 nvidia-uvm /proc/devices 2>/dev/null | awk '{print $1}'); [ -n "$UVM_MAJOR" ] || UVM_MAJOR=511
+		[ -c /dev/nvidia-uvm ] || mknod -m 666 /dev/nvidia-uvm c "$UVM_MAJOR" 0 2>/dev/null || true
+		[ -c /dev/nvidia-uvm-tools ] || mknod -m 666 /dev/nvidia-uvm-tools c "$UVM_MAJOR" 1 2>/dev/null || true
 		[ -c /dev/nvidia-modeset ] || mknod -m 666 /dev/nvidia-modeset c 195 254 2>/dev/null || true
+		chmod 666 /dev/nvidia-uvm /dev/nvidia-uvm-tools 2>/dev/null || true
 	else
 		echo "  Installing/blacklisting for K80..."
 		echo "  - Blacklisting nouveau"
@@ -187,7 +189,7 @@ pct create "${LXC_ID}" "${LXC_IMAGE}" \
 	--hostname "${LXC_HOSTNAME}" \
 	--memory "${LXC_MEMORY}" \
 	--cores "${LXC_CORES}" \
-	--features nesting=1,keyctl=1 \
+	--features nesting=1,keyctl=1,fuse=1 \
 	--net0 name=eth0,bridge=vmbr0,ip=${LXC_IP_CONFIG},gw=${LXC_GATEWAY} \
 	--unprivileged 0 \
 	--onboot 1 \

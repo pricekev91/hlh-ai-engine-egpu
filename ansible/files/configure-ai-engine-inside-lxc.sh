@@ -37,7 +37,8 @@ apt-get install -y --no-install-recommends \
   libopenblas-dev libssl-dev ca-certificates gnupg \
   openssh-server
 
-# Add NVIDIA CUDA repo for ubuntu2404 (pinned CUDA 11.8)
+# Add NVIDIA CUDA repo for ubuntu2204 (pinned CUDA 11.8 — last with cc 3.7)
+# CUDA 11.8 predates noble 24.04, so we reuse the ubuntu2204 repo even inside noble LXC.
 if [ ! -f /etc/apt/sources.list.d/cuda-ubuntu2204.list ]; then
   echo "  Adding NVIDIA CUDA repo (ubuntu2204, CUDA $CUDA_MAJOR)..."
   curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/3bf863cc.pub | gpg --dearmor -o /usr/share/keyrings/nvidia-cuda.gpg 2>/dev/null || \
@@ -47,20 +48,38 @@ if [ ! -f /etc/apt/sources.list.d/cuda-ubuntu2204.list ]; then
 fi
 
 # Install CUDA toolkit 11.8 (pinned) — driver is host-side 470, toolkit is LXC-side
-# Noble (24.04) lacks libtinfo5 needed by nsight-systems from cuda 11.8 (built for jammy).
-# Add jammy for libtinfo5 (noble has libtinfo6, cuda 11.8 nsight needs 5)
+# Noble (24.04) ships libtinfo6; cuda 11.8's nsight-systems (jammy build) needs libtinfo5.
+# Add jammy with low priority (100) so only libtinfo5/libncurses5 are pulled, not the whole jammy archive.
 echo "deb http://archive.ubuntu.com/ubuntu jammy main universe" > /etc/apt/sources.list.d/jammy-libtinfo5.list
 echo "deb http://archive.ubuntu.com/ubuntu jammy-updates main universe" >> /etc/apt/sources.list.d/jammy-libtinfo5.list
+cat > /etc/apt/preferences.d/jammy-libtinfo5-pin <<'PIN'
+Package: *
+Pin: release n=jammy
+Pin-Priority: 100
+PIN
+cat > /etc/apt/preferences.d/jammy-libtinfo5-allow <<'PIN2'
+Package: libtinfo5 libncurses5
+Pin: release n=jammy
+Pin-Priority: 500
+PIN2
 apt-get update
-apt-get install -y libtinfo5 libncurses5 2>&1 | tail -n 10 || apt-get install -y libtinfo5=6.3-2ubuntu0.1 2>&1 | tail -n 10 || true
-echo "  Installing cuda-toolkit-$CUDA_MAJOR=$CUDA_VERSION (pinned, no nsight)..."
-# Install without nsight to avoid libtinfo5 pull; use --no-install-recommends and allow unauthenticated
-apt-get install -y --no-install-recommends cuda-toolkit-${CUDA_MAJOR}=${CUDA_VERSION} -o APT::Get::Fix-Broken=true 2>&1 | tail -n 30 || \
-apt-get install -y --no-install-recommends cuda-nvcc-11-8 cuda-cudart-11-8 cuda-cudart-dev-11-8 libcurand-11-8 libcufft-11-8 libcufft-dev-11-8 libcusolver-11-8 libcusparse-11-8 2>&1 | tail -n 30 || \
-apt-get download cuda-toolkit-${CUDA_MAJOR} 2>&1 | head -n 20
-# Ensure nvidia libs match host driver 470.256.02 (not 535) - use real .1 package, not transitional .5
-apt-get install -y --allow-downgrades libnvidia-compute-470=470.256.02-0ubuntu0.24.04.1 2>&1 | tail -n 20 || true
-apt-get install -y --no-install-recommends nvidia-utils-470=470.256.02-0ubuntu0.24.04.1 2>&1 | tail -n 20 || true
+apt-get install -y -t jammy libtinfo5 libncurses5 2>&1 | tail -n 10 || apt-get install -y libtinfo5=6.3-2ubuntu0.1 2>&1 | tail -n 10 || true
+echo "  Installing cuda-toolkit-$CUDA_MAJOR=$CUDA_VERSION (pinned)..."
+# Prefer individual toolkit components (avoids nsight/libtinfo5 dependency). Meta package cuda-toolkit-11-8 pulls nsight.
+if ! apt-get install -y --no-install-recommends cuda-nvcc-11-8 cuda-cudart-11-8 cuda-cudart-dev-11-8 libcurand-11-8 libcufft-11-8 libcufft-dev-11-8 libcusolver-11-8 libcusparse-11-8 cuda-command-line-tools-11-8 2>&1 | tail -n 30; then
+  echo "  Fallback: trying cuda-toolkit meta package..."
+  apt-get install -y --no-install-recommends cuda-toolkit-${CUDA_MAJOR}=${CUDA_VERSION} -o APT::Get::Fix-Broken=true 2>&1 | tail -n 30 || {
+    echo "ERROR: CUDA toolkit install failed — check cuda-ubuntu2204 repo and libtinfo5" >&2
+    exit 1
+  }
+fi
+# Ensure nvidia userspace is 470 (last for Kepler cc 3.7), not 535 transitional — reuse host branch.
+# CT uses the same 470 branch as host; CUDA 12 drops Kepler, so 470 is final.
+apt-get install -y --allow-downgrades libnvidia-compute-470=470.256.02-0ubuntu0.24.04.1 2>&1 | tail -n 20 || {
+  echo "WARNING: libnvidia-compute-470 470.256.02 not found in noble repo, trying any 470" >&2
+  apt-get install -y --allow-downgrades libnvidia-compute-470 2>&1 | tail -n 20 || true
+}
+apt-get install -y --no-install-recommends nvidia-utils-470=470.256.02-0ubuntu0.24.04.1 2>&1 | tail -n 20 || apt-get install -y --no-install-recommends nvidia-utils-470 2>&1 | tail -n 20 || true
 # Host driver provides /dev/nvidia* but LXC needs userspace nvidia-smi + libnvidia-ml 470
 # The 470 deb on noble leaves a broken symlink /usr/bin/nvidia-smi -> /usr/lib/nvidia-470/bin/nvidia-smi (non-existent)
 # and libnvidia-ml.so.1 -> 535. Fix both by using host's binary pushed to /tmp/nvidia-smi
@@ -74,7 +93,9 @@ if [ -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.470.256.02 ]; then
   ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so
   ldconfig
 fi
-apt-mark hold libnvidia-compute-535 nvidia-utils-535 2>&1 | head -n 5 || true
+# Hold 470 and also prevent accidental 535 upgrade; keep CUDA toolkit pinned to 11.8
+apt-mark hold libnvidia-compute-470 nvidia-utils-470 libnvidia-compute-535 nvidia-utils-535 2>&1 | head -n 5 || true
+apt-mark hold cuda-toolkit-11-8 cuda-nvcc-11-8 cuda-cudart-11-8 2>&1 | head -n 5 || true
 
 # Ensure nvidia libs visible
 export PATH=/usr/local/cuda/bin:$PATH
@@ -167,16 +188,22 @@ fi
 echo "[2/7] Detected ${TOTAL_MEM_KB}kB RAM -> using -j${JOBS} (was -j$(nproc)) to avoid OOM"
 cmake --build build --config Release -j${JOBS}
 
-# --- 3. MODEL STORAGE & DOWNLOAD ---
-echo "[3/7] Setting up model directory..."
+# --- 3. MODEL STORAGE (bind mount — same path host and CT) ---
+# Host RaidZ1-6TB ZFS dataset /srv/ai/models is bind-mounted via --mp0 into LXC at /srv/ai/models.
+# Models are already present on host after mount — CT does not download. We pick the active
+# model from the shared directory.
+echo "[3/7] Setting up model directory (bind mount host == CT: $MODEL_DIR)..."
 mkdir -p "$MODEL_DIR"
+# Verify mount is active (should show ZFS or bind)
+mount | grep -E "on ${MODEL_DIR} " | head -3 || echo "  (no mount yet — may be bind from host)"
+ls -lh "$MODEL_DIR" | head -20 || true
 cd "$MODEL_DIR"
 
 ACTIVE_MODEL_FILE=""
 
 if [ -f "${MODEL_DIR}/${DEFAULT_MODEL_FILE}" ]; then
   ACTIVE_MODEL_FILE="$DEFAULT_MODEL_FILE"
-  echo "Default model already present: $ACTIVE_MODEL_FILE"
+  echo "Default model already present on shared mount: $ACTIVE_MODEL_FILE"
 else
   PREFERRED_MODELS=(
     "Mellum2-12B-A2.5B-Thinking-Q3_K_M.gguf"
@@ -187,7 +214,7 @@ else
   for MODEL_CANDIDATE in "${PREFERRED_MODELS[@]}"; do
     if [ -f "${MODEL_DIR}/${MODEL_CANDIDATE}" ]; then
       ACTIVE_MODEL_FILE="$MODEL_CANDIDATE"
-      echo "Using preferred existing model from mounted storage: $ACTIVE_MODEL_FILE"
+      echo "Using preferred existing model from shared mount: $ACTIVE_MODEL_FILE"
       break
     fi
   done
@@ -196,12 +223,18 @@ else
     mapfile -t EXISTING_MODELS < <(find "$MODEL_DIR" -maxdepth 1 -type f -name '*.gguf' -printf '%f\n' | sort)
     if [ "${#EXISTING_MODELS[@]}" -gt 0 ]; then
       ACTIVE_MODEL_FILE="${EXISTING_MODELS[0]}"
-      echo "Using existing model from mounted storage: $ACTIVE_MODEL_FILE"
+      echo "Using existing model from shared mount: $ACTIVE_MODEL_FILE"
     else
       ACTIVE_MODEL_FILE="$DEFAULT_MODEL_FILE"
-      echo "No existing models found; will use default (download manually if needed): $ACTIVE_MODEL_FILE"
+      echo "WARNING: No .gguf found on shared mount $MODEL_DIR — service will point to $ACTIVE_MODEL_FILE (populate host RaidZ1-6TB/ai/models first)" >&2
+      ls -R "$MODEL_DIR" 2>&1 | head -20 || true
     fi
   fi
+fi
+
+# Validate active model exists
+if [ ! -f "${MODEL_DIR}/${ACTIVE_MODEL_FILE}" ]; then
+  echo "WARNING: Active model file not found: ${MODEL_DIR}/${ACTIVE_MODEL_FILE} — ai-engine will fail to start until host populates /srv/ai/models" >&2
 fi
 
 # --- 4. SYSTEMD SERVICE ---

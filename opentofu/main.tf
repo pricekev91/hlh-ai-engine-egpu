@@ -51,21 +51,28 @@ resource "proxmox_lxc" "hlh_ai_engine_egpu_k80" {
   # Both chips share the OCuLink switch at var.egpu_pci_address (0000:c5:00.0)
   # but are in separate IOMMU groups (23/24). LXC passthrough is via /dev/nvidia*
   # (cgroup + bind-mount), not hostpci. hostpci is not used for LXC; see deploy
-  # script for c 195:* / c 511:* allows and /dev/nvidia* mounts.
+  # script for c 195:* / 511:* (UVM, dynamic major) allows and /dev/nvidia* mounts.
   # We keep no hostpci device block here — the deploy script appends the
   # NVIDIA cgroup/mount entries post-create. This keeps the base resource
   # card-agnostic and pinned versions in variables.tf.
+  # NOTE: prox01's nvidia-uvm major is dynamic (511 on kernel 7.0, 507 on older).
+  # Deploy handles both via `grep nvidia-uvm /proc/devices`. /dev/nvidia-modeset is 195:254.
 
-  # Model storage volume mount (host /srv/ai/models -> LXC /srv/ai/models)
+  # Model storage — bind-mount of host RaidZ1-6TB ZFS dataset /srv/ai/models
+  # Host and every LXC see the same path: /srv/ai/models (shared, 775, zfs xattr,noacl).
+  # deploy.sh uses: --mp0 "/srv/ai/models,mp=/srv/ai/models" (pct bind mount).
+  # For OpenTofu (telmate/proxmox) we map the same via bind mount:
+  # `volume = "/srv/ai/models"` + `mp = "/srv/ai/models"`.
   mp0 {
-    path    = var.model_mount_path
-    storage = var.model_storage
+    volume = var.model_mount_path
+    mp     = var.model_mount_path
   }
 
   # NOTE: NVIDIA cgroup (c 195:* rwm, c 511:* rwm) and bind-mounts
   # (/dev/nvidia0, /dev/nvidia1, /dev/nvidiactl, /dev/nvidia-uvm*) are
   # appended by deploy-hlh-ai-engine-egpu-k80.sh. Manual equivalent:
   #   pct set <VMID> --lxc.conf 'lxc.cgroup2.devices.allow: c 195:* rwm'
+  #   pct set <VMID> --lxc.conf 'lxc.cgroup2.devices.allow: c 511:* rwm'
   #   pct set <VMID> --lxc.conf 'lxc.mount.entry: /dev/nvidia0 dev/nvidia0 none bind,optional,create=file'
 }
 
