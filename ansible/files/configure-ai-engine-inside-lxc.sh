@@ -141,13 +141,15 @@ fi
 
 cd "$LLAMA_CPP_DIR"
 
-# K80 needs CUDA_ARCH 37, no FA (flash attention requires cc 7+), keep cuBLAS
+# K80 needs CUDA_ARCH 37, no FA (flash attention requires cc 7+), avoid tensor ops for MTP on Kepler
 # Use -allow-unsupported-compiler as fallback if gcc-11 not available
 cmake -S . -B build \
   -DGGML_CUDA=ON \
   -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH}" \
+  -DGGML_CUDA_FA=OFF \
   -DGGML_CUDA_FA_ALL_QUANTS=OFF \
-  -DGGML_CUDA_FORCE_DMMV=OFF \
+  -DGGML_CUDA_FORCE_DMMV=ON \
+  -DGGML_CUDA_FORCE_MMQ=ON \
   -DGGML_VULKAN=OFF \
   -DGGML_HIP=OFF \
   -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler" \
