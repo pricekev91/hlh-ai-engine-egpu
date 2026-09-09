@@ -124,6 +124,14 @@ echo "  Pinned: CUDA $CUDA_REPO_VERSION + driver $NVIDIA_DRIVER_VERSION (cc $CUD
 
 # --- 2. BUILD LLAMA.CPP (CUDA 11.8, cc 3.7) ---
 echo "[2/7] Cloning and building llama.cpp (CUDA $CUDA_MAJOR, cc $CUDA_ARCH)..."
+# CUDA 11.8 only supports gcc <= 11. Noble default is gcc 13, so install gcc-11 and use it
+apt-get install -y gcc-11 g++-11 2>&1 | tail -n 20 || true
+export CC=gcc-11
+export CXX=g++-11
+export CUDAHOSTCXX=g++-11
+export CUDAHOSTCC=gcc-11
+update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100 2>&1 | head -n 5 || true
+update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 100 2>&1 | head -n 5 || true
 if [ ! -d "$LLAMA_CPP_DIR" ]; then
   git clone --depth=1 "$LLAMA_CPP_REPO" "$LLAMA_CPP_DIR"
 else
@@ -133,6 +141,7 @@ fi
 cd "$LLAMA_CPP_DIR"
 
 # K80 needs CUDA_ARCH 37, no FA (flash attention requires cc 7+), keep cuBLAS
+# Use -allow-unsupported-compiler as fallback if gcc-11 not available
 cmake -S . -B build \
   -DGGML_CUDA=ON \
   -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH}" \
@@ -140,6 +149,7 @@ cmake -S . -B build \
   -DGGML_CUDA_FORCE_DMMV=OFF \
   -DGGML_VULKAN=OFF \
   -DGGML_HIP=OFF \
+  -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler" \
   -DCMAKE_BUILD_TYPE=Release
 
 echo "[2/7] Building... (this can take 15-30 minutes with 12 cores, CUDA 11.8)"
