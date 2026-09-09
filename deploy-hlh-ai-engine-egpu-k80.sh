@@ -67,7 +67,7 @@ confirm_existing_lxc_delete() {
 # --- K80 helpers: dual GK210 ---
 detect_k80_pcis() {
 	# K80 shows as two 3D controllers: c7:00.0 + c8:00.0 (GK210GL)
-	lspci -D 2>/dev/null | grep -i "10de:102d" | awk '{print $1}' | sort
+	lspci -nn -D 2>/dev/null | grep -i "10de:102d" | awk '{print $1}' | sort
 }
 
 get_iommu_for() { readlink "/sys/bus/pci/devices/$1/iommu_group" 2>/dev/null || true; }
