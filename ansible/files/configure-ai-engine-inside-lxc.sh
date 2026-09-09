@@ -95,7 +95,18 @@ systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
 
 # --- Pre-Build Checks ---
 echo "[1/7] Verifying CUDA + K80 dual-GPU..."
-nvidia-smi -L 2>&1 | head -20 || { echo "ERROR: nvidia-smi failed. Check /dev/nvidia* passthrough (c 195:*, c 511:*)." ; ls -l /dev/nvidia* 2>&1 | head -20; exit 1; }
+# Fix nvidia-smi inside LXC (host driver 470.256.02, LXC apt may leave broken symlink to non-existent /usr/lib/nvidia-470/bin/nvidia-smi)
+if [ -L /usr/bin/nvidia-smi ] && [ ! -e /usr/bin/nvidia-smi ]; then rm -f /usr/bin/nvidia-smi; fi
+if [ ! -x /usr/bin/nvidia-smi ] && [ -x /tmp/nvidia-smi ]; then cp /tmp/nvidia-smi /usr/bin/nvidia-smi; chmod +x /usr/bin/nvidia-smi; fi
+if [ -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.470.256.02 ]; then
+  ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 2>&1 | head -n 5 || true
+  ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so 2>&1 | head -n 5 || true
+  ldconfig 2>&1 | head -n 5 || true
+fi
+# Ensure PATH includes CUDA
+export PATH=/usr/local/cuda/bin:${PATH:-}
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
+nvidia-smi -L 2>&1 | head -20 || { echo "ERROR: nvidia-smi failed. Check /dev/nvidia* passthrough (c 195:*, c 511:*)." ; ls -l /dev/nvidia* 2>&1 | head -20; ls -l /usr/bin/nvidia-smi* 2>&1 | head -n 20; exit 1; }
 echo "  nvidia-smi -L:"
 nvidia-smi -L
 echo "  Checking both GK210 chips (expect 2 GPUs):"
