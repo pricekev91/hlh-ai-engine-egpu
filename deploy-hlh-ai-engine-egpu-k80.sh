@@ -75,9 +75,9 @@ get_iommu_for() { readlink "/sys/bus/pci/devices/$1/iommu_group" 2>/dev/null || 
 # --- 0/6 Host driver (pinned) ---
 if [[ "$SKIP_HOST_DRIVER" == "false" ]]; then
 	echo "[0/6] Host NVIDIA driver check (pinned: nvidia-tesla-470 $NVIDIA_TESLA_470_VERSION_SHORT + CUDA $CUDA_MAJOR)..."
-	if lsmod | grep -q "^nvidia " && modinfo nvidia 2>/dev/null | grep -q "$DRIVER_BRANCH"; then
+	if lsmod | grep "nvidia" >/dev/null && modinfo nvidia 2>/dev/null | grep "$DRIVER_BRANCH" >/dev/null; then
 		echo "  Host driver already loaded: $(modinfo nvidia 2>/dev/null | grep ^version: | head -1)"
-		nvidia-smi 2>&1 | head -5 || true
+		set +o pipefail; nvidia-smi 2>&1 | head -5 || true; set -o pipefail
 	else
 		echo "  Installing/blacklisting for K80..."
 		echo "  - Blacklisting nouveau"
@@ -118,8 +118,8 @@ echo "  Detected K80 PCI addresses:"
 echo "$K80_PCI_LIST" | sed 's/^/    /'
 K80_COUNT=$(echo "$K80_PCI_LIST" | wc -l)
 if [ "$K80_COUNT" -ne 2 ]; then echo "WARNING: Expected 2 GK210 chips, found $K80_COUNT. Continuing." >&2; fi
-if ! lsmod | grep -q "^nvidia "; then echo "ERROR: nvidia module not loaded. Run without --skip-host-driver." >&2; exit 1; fi
-nvidia-smi -L 2>&1 | head -10 || { echo "nvidia-smi failed"; exit 1; }
+if ! lsmod | grep "nvidia" >/dev/null; then echo "ERROR: nvidia module not loaded. Run without --skip-host-driver." >&2; exit 1; fi
+set +o pipefail; nvidia-smi -L 2>&1 | head -10 || { echo "nvidia-smi failed"; exit 1; }; set -o pipefail
 
 echo "[1/6] Creating model storage directory on ${POOL}..."
 mkdir -p "${MODEL_HOST_DIR}"
@@ -184,6 +184,7 @@ sleep 5
 echo "[5/6] Running in-container CUDA bootstrap (pinned: CUDA $CUDA_VERSION, driver $DRIVER_BRANCH)..."
 pct exec "${LXC_ID}" -- mkdir -p /root/ai-engine-bootstrap
 pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh --perms 0755
+pct push "${LXC_ID}" "/usr/bin/nvidia-smi" "/tmp/nvidia-smi" --perms 0755
 pct exec "${LXC_ID}" -- bash /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh
 
 echo "[6/6] Deployment complete. LXC ${LXC_ID} (${LXC_NAME}) is running."
