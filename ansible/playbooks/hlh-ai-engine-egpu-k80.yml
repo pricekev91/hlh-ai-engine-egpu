@@ -1,0 +1,12 @@
+---
+- name: Configure HLH AI engine (CUDA K80 Tesla GK210 dual)
+  hosts: hlh_ai_engine_egpu_k80
+  become: true
+  vars:
+    hlh_offline: false
+
+  tasks:
+    - name: Run AI engine bootstrap script inside target LXC
+      ansible.builtin.script: ../files/configure-ai-engine-inside-lxc.sh
+      environment:
+        HLH_OFFLINE: "{{ (hlh_offline | bool) | ternary('1', '0') }}"
