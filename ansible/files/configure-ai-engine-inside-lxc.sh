@@ -37,11 +37,11 @@ apt-get install -y --no-install-recommends \
   openssh-server
 
 # Add NVIDIA CUDA repo for ubuntu2404 (pinned CUDA 11.8)
-if [ ! -f /etc/apt/sources.list.d/cuda-ubuntu2404.list ]; then
-  echo "  Adding NVIDIA CUDA repo (ubuntu2404, CUDA $CUDA_MAJOR)..."
-  curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/3bf863cc.pub | gpg --dearmor -o /usr/share/keyrings/nvidia-cuda.gpg 2>/dev/null || \
-  curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/7fa2af80.pub | gpg --dearmor -o /usr/share/keyrings/nvidia-cuda.gpg
-  echo "deb [signed-by=/usr/share/keyrings/nvidia-cuda.gpg] https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64 /" > /etc/apt/sources.list.d/cuda-ubuntu2404.list
+if [ ! -f /etc/apt/sources.list.d/cuda-ubuntu2204.list ]; then
+  echo "  Adding NVIDIA CUDA repo (ubuntu2204, CUDA $CUDA_MAJOR)..."
+  curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/3bf863cc.pub | gpg --dearmor -o /usr/share/keyrings/nvidia-cuda.gpg 2>/dev/null || \
+  curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/7fa2af80.pub | gpg --dearmor -o /usr/share/keyrings/nvidia-cuda.gpg
+  echo "deb [signed-by=/usr/share/keyrings/nvidia-cuda.gpg] https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64 /" > /etc/apt/sources.list.d/cuda-ubuntu2204.list
   apt-get update
 fi
 
