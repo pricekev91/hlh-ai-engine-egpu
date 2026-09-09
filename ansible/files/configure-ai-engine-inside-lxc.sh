@@ -46,9 +46,17 @@ if [ ! -f /etc/apt/sources.list.d/cuda-ubuntu2204.list ]; then
 fi
 
 # Install CUDA toolkit 11.8 (pinned) — driver is host-side 470, toolkit is LXC-side
-echo "  Installing cuda-toolkit-$CUDA_MAJOR=$CUDA_VERSION (pinned)..."
-apt-get install -y --no-install-recommends cuda-toolkit-${CUDA_MAJOR}=${CUDA_VERSION} cuda-drivers-470=470.256.02-1 2>&1 | tail -n 30 || \
-apt-get install -y --no-install-recommends cuda-toolkit-${CUDA_MAJOR} 2>&1 | tail -n 30
+# Noble (24.04) lacks libtinfo5 needed by nsight-systems from cuda 11.8 (built for jammy).
+# Add jammy for libtinfo5 and install toolkit without nsight to avoid broken deps.
+echo "deb http://archive.ubuntu.com/ubuntu jammy main" > /etc/apt/sources.list.d/jammy-libtinfo5.list
+apt-get update
+apt-get install -y libtinfo5 2>&1 | tail -n 10 || true
+echo "  Installing cuda-toolkit-$CUDA_MAJOR=$CUDA_VERSION (pinned, no nsight)..."
+apt-get install -y --no-install-recommends cuda-toolkit-${CUDA_MAJOR}=${CUDA_VERSION} 2>&1 | tail -n 30 || \
+apt-get install -y --no-install-recommends cuda-toolkit-${CUDA_MAJOR} --no-install-recommends -o APT::Get::Fix-Broken=true 2>&1 | tail -n 30 || \
+apt-get download cuda-toolkit-${CUDA_MAJOR} 2>&1 | head -n 20
+# Ensure nvidia-smi inside LXC (host driver provides /dev/nvidia*, but userspace needs utils)
+apt-get install -y nvidia-utils-470 2>&1 | tail -n 20 || apt-get install -y --no-install-recommends nvidia-utils-470 2>&1 | tail -n 20 || true
 
 # Ensure nvidia libs visible
 export PATH=/usr/local/cuda/bin:$PATH
