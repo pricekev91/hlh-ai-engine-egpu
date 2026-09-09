@@ -78,6 +78,44 @@ if [[ "$SKIP_HOST_DRIVER" == "false" ]]; then
 	if lsmod | grep "nvidia" >/dev/null && modinfo nvidia 2>/dev/null | grep "$DRIVER_BRANCH" >/dev/null; then
 		echo "  Host driver already loaded: $(modinfo nvidia 2>/dev/null | grep ^version: | head -1)"
 		set +o pipefail; nvidia-smi 2>&1 | head -5 || true; set -o pipefail
+		# Ensure nvidia_uvm persists across reboot (fixes CPU fallback: missing /dev/nvidia-uvm)
+		if [ ! -f /etc/modules-load.d/nvidia.conf ]; then
+			echo "  - Installing /etc/modules-load.d/nvidia.conf for nvidia_uvm persistence"
+			cat > /etc/modules-load.d/nvidia.conf <<'MOD'
+nvidia
+nvidia_uvm
+nvidia_modeset
+nvidia_drm
+MOD
+		fi
+		if [ ! -f /etc/systemd/system/nvidia-uvm-devices.service ]; then
+			echo "  - Installing nvidia-uvm-devices.service (Before pve-guests.service)"
+			cat > /etc/systemd/system/nvidia-uvm-devices.service <<'SVC'
+[Unit]
+Description=Create NVIDIA UVM device nodes for LXC passthrough (K80)
+Before=pve-guests.service
+After=systemd-modules-load.service
+Wants=systemd-modules-load.service
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '/sbin/modprobe nvidia || true; /sbin/modprobe nvidia_uvm || true; /sbin/modprobe nvidia_modeset || true; /sbin/modprobe nvidia_drm || true; /usr/bin/nvidia-modprobe -u -c 0 || true; /bin/mknod -m 666 /dev/nvidia-uvm c 507 0 2>/dev/null || /bin/chmod 666 /dev/nvidia-uvm 2>/dev/null || true; /bin/mknod -m 666 /dev/nvidia-uvm-tools c 507 1 2>/dev/null || /bin/chmod 666 /dev/nvidia-uvm-tools 2>/dev/null || true; /bin/mknod -m 666 /dev/nvidia-modeset c 195 254 2>/dev/null || /bin/chmod 666 /dev/nvidia-modeset 2>/dev/null || true; ls -l /dev/nvidia* 2>&1 | head -n 20'
+
+[Install]
+WantedBy=multi-user.target
+SVC
+			systemctl daemon-reload
+			systemctl enable nvidia-uvm-devices.service >/dev/null 2>&1 || true
+		fi
+		systemctl start nvidia-uvm-devices.service >/dev/null 2>&1 || true
+		# Ensure devices exist now (host reboot left them missing)
+		/sbin/modprobe nvidia_uvm 2>/dev/null || true
+		/usr/bin/nvidia-modprobe -u -c 0 2>/dev/null || true
+		[ -c /dev/nvidia-uvm ] || mknod -m 666 /dev/nvidia-uvm c 507 0 2>/dev/null || true
+		[ -c /dev/nvidia-uvm-tools ] || mknod -m 666 /dev/nvidia-uvm-tools c 507 1 2>/dev/null || true
+		[ -c /dev/nvidia-modeset ] || mknod -m 666 /dev/nvidia-modeset c 195 254 2>/dev/null || true
 	else
 		echo "  Installing/blacklisting for K80..."
 		echo "  - Blacklisting nouveau"
@@ -167,8 +205,9 @@ cat >> "/etc/pve/lxc/${LXC_ID}.conf" <<'LXCCONF'
 # c7:00.0 + c8:00.0 (10de:102d) share OCuLink switch; IOMMU groups 23/24 separate
 # Expose both chips as nvidia0 + nvidia1 plus control nodes
 lxc.cgroup2.devices.allow: c 195:* rwm
-lxc.cgroup2.devices.allow: c 511:* rwm
+lxc.cgroup2.devices.allow: c 507:* rwm
 lxc.cgroup2.devices.allow: c 510:* rwm
+lxc.cgroup2.devices.allow: c 511:* rwm
 lxc.mount.entry: /dev/nvidia0 dev/nvidia0 none bind,optional,create=file
 lxc.mount.entry: /dev/nvidia1 dev/nvidia1 none bind,optional,create=file
 lxc.mount.entry: /dev/nvidiactl dev/nvidiactl none bind,optional,create=file
