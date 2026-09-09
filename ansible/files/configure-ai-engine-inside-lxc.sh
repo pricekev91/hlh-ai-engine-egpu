@@ -533,11 +533,9 @@ chmod +x "$SWITCH_SCRIPT"
 # Shared copy for MI60 reuse (single source)
 cp "$SWITCH_SCRIPT" "$SHARED_SWITCH_SCRIPT"
 chmod +x "$SHARED_SWITCH_SCRIPT"
-# Cleanup stale names to avoid confusion (keep compat symlinks)
+# Cleanup stale names — only k80-switch-model.sh should exist per request
 rm -f /usr/local/bin/cuda-switch-model.sh /usr/local/bin/egpu-switch-model.sh /usr/local/bin/switch-model.sh 2>/dev/null || true
 rm -f "${MODEL_DIR}/cuda-switch-model.sh" "${MODEL_DIR}/egpu-switch-model.sh" "${MODEL_DIR}/switch-model.sh" 2>/dev/null || true
-ln -sf k80-switch-model.sh /usr/local/bin/cuda-switch-model.sh 2>/dev/null || true
-ln -sf k80-switch-model.sh "${MODEL_DIR}/cuda-switch-model.sh" 2>/dev/null || true
 
 # --- 6. ENABLE & START ---
 echo "[6/7] Enabling $SERVICE_NAME..."
