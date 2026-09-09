@@ -47,22 +47,28 @@ fi
 
 # Install CUDA toolkit 11.8 (pinned) — driver is host-side 470, toolkit is LXC-side
 # Noble (24.04) lacks libtinfo5 needed by nsight-systems from cuda 11.8 (built for jammy).
-# Add jammy for libtinfo5 and install toolkit without nsight to avoid broken deps.
-echo "deb http://archive.ubuntu.com/ubuntu jammy main" > /etc/apt/sources.list.d/jammy-libtinfo5.list
+# Add jammy for libtinfo5 (noble has libtinfo6, cuda 11.8 nsight needs 5)
+echo "deb http://archive.ubuntu.com/ubuntu jammy main universe" > /etc/apt/sources.list.d/jammy-libtinfo5.list
+echo "deb http://archive.ubuntu.com/ubuntu jammy-updates main universe" >> /etc/apt/sources.list.d/jammy-libtinfo5.list
 apt-get update
-apt-get install -y libtinfo5 2>&1 | tail -n 10 || true
+apt-get install -y libtinfo5 libncurses5 2>&1 | tail -n 10 || apt-get install -y libtinfo5=6.3-2ubuntu0.1 2>&1 | tail -n 10 || true
 echo "  Installing cuda-toolkit-$CUDA_MAJOR=$CUDA_VERSION (pinned, no nsight)..."
-apt-get install -y --no-install-recommends cuda-toolkit-${CUDA_MAJOR}=${CUDA_VERSION} 2>&1 | tail -n 30 || \
-apt-get install -y --no-install-recommends cuda-toolkit-${CUDA_MAJOR} --no-install-recommends -o APT::Get::Fix-Broken=true 2>&1 | tail -n 30 || \
+# Install without nsight to avoid libtinfo5 pull; use --no-install-recommends and allow unauthenticated
+apt-get install -y --no-install-recommends cuda-toolkit-${CUDA_MAJOR}=${CUDA_VERSION} -o APT::Get::Fix-Broken=true 2>&1 | tail -n 30 || \
+apt-get install -y --no-install-recommends cuda-nvcc-11-8 cuda-cudart-11-8 cuda-cudart-dev-11-8 libcurand-11-8 libcufft-11-8 libcufft-dev-11-8 libcusolver-11-8 libcusparse-11-8 2>&1 | tail -n 30 || \
 apt-get download cuda-toolkit-${CUDA_MAJOR} 2>&1 | head -n 20
-# Ensure nvidia-smi inside LXC (host driver provides /dev/nvidia*, but userspace needs utils)
-apt-get install -y nvidia-utils-470 2>&1 | tail -n 20 || apt-get install -y --no-install-recommends nvidia-utils-470 2>&1 | tail -n 20 || true
+# Ensure nvidia-smi inside LXC matches host driver 470.256.02 (not 535)
+apt-get install -y nvidia-utils-470=470.256.02-0ubuntu0.24.04.5 2>&1 | tail -n 20 || apt-get install -y --no-install-recommends nvidia-utils-470 2>&1 | tail -n 20 || true
+apt-get purge -y nvidia-utils-535 2>&1 | tail -n 10 || true
 
 # Ensure nvidia libs visible
 export PATH=/usr/local/cuda/bin:$PATH
-export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
 echo 'export PATH=/usr/local/cuda/bin:$PATH' > /etc/profile.d/cuda.sh
-echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH' >> /etc/profile.d/cuda.sh
+echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}' >> /etc/profile.d/cuda.sh
+# Fix nvidia-smi to use 470 (host driver 470.256.02, not 535)
+update-alternatives --set nvidia  /usr/lib/nvidia-470/bin/nvidia-smi 2>&1 | head -n 5 || update-alternatives --auto nvidia 2>&1 | head -n 5 || true
+ln -sf /usr/lib/nvidia-470/bin/nvidia-smi /usr/bin/nvidia-smi 2>&1 | head -n 5 || true
 
 # Groups for GPU (nvidia)
 usermod -aG render root || true
