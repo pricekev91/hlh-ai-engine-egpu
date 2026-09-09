@@ -57,9 +57,17 @@ echo "  Installing cuda-toolkit-$CUDA_MAJOR=$CUDA_VERSION (pinned, no nsight)...
 apt-get install -y --no-install-recommends cuda-toolkit-${CUDA_MAJOR}=${CUDA_VERSION} -o APT::Get::Fix-Broken=true 2>&1 | tail -n 30 || \
 apt-get install -y --no-install-recommends cuda-nvcc-11-8 cuda-cudart-11-8 cuda-cudart-dev-11-8 libcurand-11-8 libcufft-11-8 libcufft-dev-11-8 libcusolver-11-8 libcusparse-11-8 2>&1 | tail -n 30 || \
 apt-get download cuda-toolkit-${CUDA_MAJOR} 2>&1 | head -n 20
-# Ensure nvidia-smi inside LXC matches host driver 470.256.02 (not 535)
-apt-get install -y nvidia-utils-470=470.256.02-0ubuntu0.24.04.5 2>&1 | tail -n 20 || apt-get install -y --no-install-recommends nvidia-utils-470 2>&1 | tail -n 20 || true
-apt-get purge -y nvidia-utils-535 2>&1 | tail -n 10 || true
+# Ensure nvidia libs match host driver 470.256.02 (not 535) - use real .1 package, not transitional .5
+apt-get install -y --allow-downgrades libnvidia-compute-470=470.256.02-0ubuntu0.24.04.1 2>&1 | tail -n 20 || true
+apt-get install -y --no-install-recommends nvidia-utils-470=470.256.02-0ubuntu0.24.04.1 2>&1 | tail -n 20 || apt-get install -y --no-install-recommends nvidia-utils-470 2>&1 | tail -n 20 || true
+# Fix libnvidia-ml symlink to 470 (apt may leave it at 535)
+if [ -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.470.256.02 ]; then
+  ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 2>&1 | head -n 5 || true
+  ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so 2>&1 | head -n 5 || true
+  ldconfig 2>&1 | head -n 5 || true
+fi
+# Also ensure 535 libs are not shadowing 470
+apt-mark hold libnvidia-compute-535 nvidia-utils-535 2>&1 | head -n 5 || true
 
 # Ensure nvidia libs visible
 export PATH=/usr/local/cuda/bin:$PATH
