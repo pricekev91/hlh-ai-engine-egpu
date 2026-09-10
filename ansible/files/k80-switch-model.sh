@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # k80-switch-model.sh
-# Version: 1.7.0-k80
-# Description: Interactive model switcher for llama.cpp ai-engine service (Tesla K80 dual GK210)
+# Version: 2.0.0-k80-vulkan
+# Description: Interactive model switcher for llama.cpp ai-engine service (Tesla K80 dual GK210 Vulkan)
 # Supports: model selection, ctx-size, KV cache quantization, speculative decoding method (MTP draft / ngram / none)
-# Refactored from hlh-ai-engine switch-model.sh v1.7.0 for K80 CUDA 11.8 + 470.256.02 cc 3.7
-# K80 dual: 2x GK210GL 12GB per chip = 24GB board via OCuLink, split via CUDA_VISIBLE_DEVICES=0,1
+# Refactored from hlh-ai-engine switch-model.sh v1.7.0 for K80 Vulkan + 470.256.02 (MTP enabled via Vulkan)
+# K80 dual: 2x GK210GL 12GB per chip = 24GB board via OCuLink, Vulkan devices 0,1 (not CUDA_VISIBLE_DEVICES)
 # Changelog:
+#   2.0.0-k80-vulkan - Vulkan-only: banner 24GB, -ngl 99, --batch-size 512, verify via vulkaninfo + nvidia-smi monitoring
 #   1.7.0-k80 - Fork v1.7.0: K80 dual VRAM table (24GB), -ngl 99, --batch-size 512, no --device pin,
 #             verify via nvidia-smi, shared copy at /srv/ai/models/k80-switch-model.sh for MI60 reuse
 #   1.7.0 - (upstream) Removed DFlash2 support
@@ -72,9 +73,10 @@ rewrite_execstart() {
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════════╗"
-echo "║              k80-switch-model.sh (Tesla K80 dual GK210)         ║"
+echo "║        k80-switch-model.sh (Tesla K80 dual GK210 VULKAN)        ║"
 echo "╠══════════════════════════════════════════════════════════════════╣"
-echo "║  VRAM BUDGET  K80 dual 2×12GB = 24GB board (split 0,1)           ║"
+echo "║  BACKEND  VULKAN (MTP enabled)  CUDA only for nvidia-smi/nvtop  ║"
+echo "║  VRAM BUDGET  K80 dual 2×12GB = 24GB board (Vulkan devices 0,1)  ║"
 echo "║  Model Weights (fixed) + KV cache (scales with ctx) = total     ║"
 echo "║    70B Q2_K      ~17 GB   70B Q3_K_M   ~26 GB                    ║"
 echo "║    70B Q4_K_M    ~38 GB   70B Q6_K     ~54 GB                    ║"
@@ -95,7 +97,6 @@ CUR_KV_K=$( grep -- '--cache-type-k '  "$SYSTEMD_SERVICE" | awk '{for(i=1;i<=NF;
 CUR_KV_V=$( grep -- '--cache-type-v '  "$SYSTEMD_SERVICE" | awk '{for(i=1;i<=NF;i++) if ($i=="--cache-type-v")  print $(i+1)}') || CUR_KV_V="(not set)"
 CUR_SPEC=$( grep -- '--spec-type '     "$SYSTEMD_SERVICE" | awk '{for(i=1;i<=NF;i++) if ($i=="--spec-type")     print $(i+1)}') || CUR_SPEC="none"
 CUR_SPEC="${CUR_SPEC:-none}"
-CUR_CUDA_VISIBLE=$(grep -E '^Environment=CUDA_VISIBLE_DEVICES' "$SYSTEMD_SERVICE" | cut -d= -f2- || echo "0,1")
 K80_COUNT=$(nvidia-smi -L 2>&1 | grep -c "GPU [0-9]:" || echo "?")
 
 echo "  Model directory : $MODEL_DIR"
@@ -103,9 +104,11 @@ echo "  Currently active: $CUR_MODEL"
 echo "  ctx-size        : ${CUR_CTX:-(not set)}"
 echo "  KV cache (K/V)  : ${CUR_KV_K} / ${CUR_KV_V}"
 echo "  Spec decode     : $CUR_SPEC"
-echo "  CUDA_VISIBLE    : $CUR_CUDA_VISIBLE ($K80_COUNT K80 GPUs)"
+echo "  Vulkan devices  : $(vulkaninfo --summary 2>&1 | grep -c "GPU" || echo "?") (nvidia-smi shows $K80_COUNT K80 GPUs)"
 echo "  nvidia-smi      :"
 nvidia-smi -L 2>&1 | sed 's/^/    /' || echo "    nvidia-smi failed"
+echo "  vulkaninfo      :"
+vulkaninfo --summary 2>&1 | sed 's/^/    /' | head -n 20 || echo "    vulkaninfo failed"
 echo ""
 
 mapfile -t MODELS < <(find "$MODEL_DIR" -maxdepth 1 -type f -name '*.gguf' | sort)
@@ -185,7 +188,7 @@ if is_mtp_model "$NEW_MODEL"; then
   DEFAULT_SPEC=1
   echo ""
   echo "Speculative decoding method:"
-  echo "   1) MTP draft     — use the model's MTP heads (default, n-max $MTP_DRAFT_N_MAX)"
+  echo "   1) MTP draft     — use the model's MTP heads (default, n-max $MTP_DRAFT_N_MAX) [Vulkan OK]"
   echo "   2) ngram-mod     — n-gram matching, self-speculative (tunable)"
   echo "   3) ngram-map-k4v — n-gram keys + 4 m-gram values"
   echo "   4) ngram-map-k   — n-gram keys only"
@@ -280,7 +283,7 @@ if [ "$OK" = "1" ]; then
   echo "  [✓] Service     : $SERVICE running (health OK)"
   echo ""
   echo "  Web UI ready at       : http://$(hostname -I | awk '{print $1}'):80"
-  echo "  Verify GPU usage with  : nvidia-smi"
+  echo "  Verify GPU usage with  : nvidia-smi; nvtop; vulkaninfo --summary"
   echo "  Watch logs with       : journalctl -u $SERVICE -f"
 else
   echo "  [✗] WARNING: $SERVICE did not start cleanly after switch!"

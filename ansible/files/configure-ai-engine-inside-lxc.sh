@@ -1,21 +1,19 @@
 #!/usr/bin/env bash
 # configure-ai-engine-inside-lxc.sh
-# Version: 1.0.0-k80
-# Description: Bootstrap llama.cpp AI engine on Ubuntu 24.04 LXC with CUDA 11.8 for Tesla K80 (GK210 dual cc 3.7) via OCuLink
+# Version: 2.0.0-k80-vulkan
+# Description: Bootstrap llama.cpp AI engine on Ubuntu 24.04 LXC with VULKAN for Tesla K80 (GK210 dual cc 3.7) via OCuLink
 # Target GPU: NVIDIA Tesla K80 2x GK210GL (12GB per chip, 24GB board) via OCuLink on Minisforum DG2 / Proxmox 9.x privileged LXC
-# Pinned: CUDA 11.8.0-1 + driver 470.256.02 (last supporting Kepler cc 3.7; CUDA 12 drops Kepler)
+# Backend: GGML_VULKAN=ON, GGML_CUDA=OFF (MTP requires Vulkan on Kepler cc 3.7; CUBLAS_STATUS_ARCH_MISMATCH with CUDA)
+# Monitoring: nvidia-utils-470 + libnvidia-compute-470 470.256.02 retained for nvidia-smi/nvtop (no CUDA toolkit)
 # Requirements: Run as root inside privileged LXC with /dev/nvidia* passthrough and /srv/ai/models bind mount
 # Changelog:
+#   2.0.0-k80-vulkan - Vulkan-only: GGML_VULKAN=ON, drop CUDA 11.8 toolkit/gcc-11, keep 470 userspace for nvtop
 #   1.0.0-k80 - Fork for hlh-ai-engine-egpu-k80 LXC 131: K80 dual-GK210, CUDA 11.8 + 470.256.02 pinned, GGML_CUDA=ON cc 3.7
 
 set -euo pipefail
 
 # --- PINNED VERSIONS (K80) ---
-CUDA_VERSION="11.8.0-1"
-CUDA_MAJOR="11-8"
-CUDA_REPO_VERSION="11.8.0"
 NVIDIA_DRIVER_VERSION="470.256.02"
-CUDA_ARCH="37"  # Kepler GK210 cc 3.7
 
 # --- CONFIGURABLE ---
 MODEL_DIR="/srv/ai/models"
@@ -28,58 +26,33 @@ SYSTEMD_SERVICE="/etc/systemd/system/${SERVICE_NAME}.service"
 SWITCH_SCRIPT="/usr/local/bin/k80-switch-model.sh"
 SHARED_SWITCH_SCRIPT="${MODEL_DIR}/k80-switch-model.sh"
 
-# --- 1. BASE DEPENDENCIES + CUDA 11.8 (pinned) ---
-echo "[1/7] Installing base dependencies + CUDA $CUDA_REPO_VERSION (pinned)..."
+# --- 1. BASE DEPENDENCIES + VULKAN + 470 USERSPACE (for nvidia-smi/nvtop) ---
+echo "[1/7] Installing base dependencies + Vulkan + 470 userspace (monitoring)..."
 apt-get update
 apt-get install -y --no-install-recommends \
   build-essential git cmake pkg-config \
   python3 python3-pip curl wget unzip bc \
   libopenblas-dev libssl-dev ca-certificates gnupg \
-  openssh-server
+  openssh-server \
+  libvulkan1 vulkan-tools glslc glslang-tools spirv-tools \
+  libvulkan-dev
 
-# Add NVIDIA CUDA repo for ubuntu2204 (pinned CUDA 11.8 — last with cc 3.7)
-# CUDA 11.8 predates noble 24.04, so we reuse the ubuntu2204 repo even inside noble LXC.
-if [ ! -f /etc/apt/sources.list.d/cuda-ubuntu2204.list ]; then
-  echo "  Adding NVIDIA CUDA repo (ubuntu2204, CUDA $CUDA_MAJOR)..."
-  curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/3bf863cc.pub | gpg --dearmor -o /usr/share/keyrings/nvidia-cuda.gpg 2>/dev/null || \
-  curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/7fa2af80.pub | gpg --dearmor -o /usr/share/keyrings/nvidia-cuda.gpg
-  echo "deb [signed-by=/usr/share/keyrings/nvidia-cuda.gpg] https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64 /" > /etc/apt/sources.list.d/cuda-ubuntu2204.list
-  apt-get update
-fi
+# Clean up stale CUDA repos/pins from previous 1.x deploys (vulkan-only now)
+rm -f /etc/apt/sources.list.d/cuda-ubuntu2204.list /etc/apt/sources.list.d/cuda-debian13.list 2>/dev/null || true
+rm -f /etc/apt/sources.list.d/jammy-libtinfo5.list 2>/dev/null || true
+rm -f /etc/apt/preferences.d/jammy-libtinfo5-pin /etc/apt/preferences.d/jammy-libtinfo5-allow 2>/dev/null || true
 
-# Install CUDA toolkit 11.8 (pinned) — driver is host-side 470, toolkit is LXC-side
-# Noble (24.04) ships libtinfo6; cuda 11.8's nsight-systems (jammy build) needs libtinfo5.
-# Add jammy with low priority (100) so only libtinfo5/libncurses5 are pulled, not the whole jammy archive.
-echo "deb http://archive.ubuntu.com/ubuntu jammy main universe" > /etc/apt/sources.list.d/jammy-libtinfo5.list
-echo "deb http://archive.ubuntu.com/ubuntu jammy-updates main universe" >> /etc/apt/sources.list.d/jammy-libtinfo5.list
-cat > /etc/apt/preferences.d/jammy-libtinfo5-pin <<'PIN'
-Package: *
-Pin: release n=jammy
-Pin-Priority: 100
-PIN
-cat > /etc/apt/preferences.d/jammy-libtinfo5-allow <<'PIN2'
-Package: libtinfo5 libncurses5
-Pin: release n=jammy
-Pin-Priority: 500
-PIN2
+# Ensure nvidia userspace is 470 (last for Kepler cc 3.7) for nvidia-smi/nvtop
+# Host provides /dev/nvidia* (470 kernel); LXC needs matching userspace 470 for monitoring
+# CUDA toolkit is NOT installed in vulkan-only mode.
 apt-get update
-apt-get install -y -t jammy libtinfo5 libncurses5 2>&1 | tail -n 10 || apt-get install -y libtinfo5=6.3-2ubuntu0.1 2>&1 | tail -n 10 || true
-echo "  Installing cuda-toolkit-$CUDA_MAJOR=$CUDA_VERSION (pinned)..."
-# Prefer individual toolkit components (avoids nsight/libtinfo5 dependency). Meta package cuda-toolkit-11-8 pulls nsight.
-if ! apt-get install -y --no-install-recommends cuda-nvcc-11-8 cuda-cudart-11-8 cuda-cudart-dev-11-8 libcurand-11-8 libcufft-11-8 libcufft-dev-11-8 libcusolver-11-8 libcusparse-11-8 cuda-command-line-tools-11-8 2>&1 | tail -n 30; then
-  echo "  Fallback: trying cuda-toolkit meta package..."
-  apt-get install -y --no-install-recommends cuda-toolkit-${CUDA_MAJOR}=${CUDA_VERSION} -o APT::Get::Fix-Broken=true 2>&1 | tail -n 30 || {
-    echo "ERROR: CUDA toolkit install failed — check cuda-ubuntu2204 repo and libtinfo5" >&2
-    exit 1
-  }
-fi
-# Ensure nvidia userspace is 470 (last for Kepler cc 3.7), not 535 transitional — reuse host branch.
-# CT uses the same 470 branch as host; CUDA 12 drops Kepler, so 470 is final.
 apt-get install -y --allow-downgrades libnvidia-compute-470=470.256.02-0ubuntu0.24.04.1 2>&1 | tail -n 20 || {
   echo "WARNING: libnvidia-compute-470 470.256.02 not found in noble repo, trying any 470" >&2
   apt-get install -y --allow-downgrades libnvidia-compute-470 2>&1 | tail -n 20 || true
 }
 apt-get install -y --no-install-recommends nvidia-utils-470=470.256.02-0ubuntu0.24.04.1 2>&1 | tail -n 20 || apt-get install -y --no-install-recommends nvidia-utils-470 2>&1 | tail -n 20 || true
+# nvtop for live GPU monitoring (K80 dual)
+apt-get install -y --no-install-recommends nvtop 2>&1 | tail -n 10 || echo "WARNING: nvtop not in repo, skipping" >&2
 # Host driver provides /dev/nvidia* but LXC needs userspace nvidia-smi + libnvidia-ml 470
 # The 470 deb on noble leaves a broken symlink /usr/bin/nvidia-smi -> /usr/lib/nvidia-470/bin/nvidia-smi (non-existent)
 # and libnvidia-ml.so.1 -> 535. Fix both by using host's binary pushed to /tmp/nvidia-smi
@@ -93,15 +66,21 @@ if [ -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.470.256.02 ]; then
   ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so
   ldconfig
 fi
-# Hold 470 and also prevent accidental 535 upgrade; keep CUDA toolkit pinned to 11.8
+# Hold 470 and prevent accidental 535 upgrade (no cuda-* holds in vulkan mode)
 apt-mark hold libnvidia-compute-470 nvidia-utils-470 libnvidia-compute-535 nvidia-utils-535 2>&1 | head -n 5 || true
-apt-mark hold cuda-toolkit-11-8 cuda-nvcc-11-8 cuda-cudart-11-8 2>&1 | head -n 5 || true
+apt-mark unhold cuda-toolkit-11-8 cuda-nvcc-11-8 cuda-cudart-11-8 2>/dev/null || true
+# Remove any stale CUDA toolkit left from 1.x (optional, keeps image lean)
+# apt-get autoremove -y cuda-toolkit-11-8 cuda-nvcc-11-8 2>&1 | tail -n 10 || true
 
-# Ensure nvidia libs visible
-export PATH=/usr/local/cuda/bin:$PATH
-export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
-echo 'export PATH=/usr/local/cuda/bin:$PATH' > /etc/profile.d/cuda.sh
-echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}' >> /etc/profile.d/cuda.sh
+# Vulkan ICD: 470 provides /usr/share/vulkan/icd.d/nvidia_icd.json via libnvidia-gl-470 or libnvidia-compute
+# Ensure ICD is visible; vulkan-tools vulkaninfo should list 2x GK210
+if [ ! -f /usr/share/vulkan/icd.d/nvidia_icd.json ]; then
+  echo "  Note: nvidia_icd.json not found, installing nvidia vulkan icd supplement..."
+  apt-get install -y --no-install-recommends libnvidia-gl-470 2>&1 | tail -n 10 || true
+fi
+echo "  Vulkan ICDs:"
+ls -l /usr/share/vulkan/icd.d/ 2>&1 | head -n 20 || true
+ls -l /etc/vulkan/icd.d/ 2>&1 | head -n 20 || true
 
 # Groups for GPU (nvidia)
 usermod -aG render root || true
@@ -119,7 +98,7 @@ systemctl enable ssh 2>/dev/null || true
 systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
 
 # --- Pre-Build Checks ---
-echo "[1/7] Verifying CUDA + K80 dual-GPU..."
+echo "[1/7] Verifying Vulkan + K80 dual-GPU (nvidia-smi for monitoring)..."
 # Fix nvidia-smi inside LXC (host driver 470.256.02, LXC apt may leave broken symlink to non-existent /usr/lib/nvidia-470/bin/nvidia-smi)
 if [ -L /usr/bin/nvidia-smi ] && [ ! -e /usr/bin/nvidia-smi ]; then rm -f /usr/bin/nvidia-smi; fi
 if [ ! -x /usr/bin/nvidia-smi ] && [ -x /tmp/nvidia-smi ]; then cp /tmp/nvidia-smi /usr/bin/nvidia-smi; chmod +x /usr/bin/nvidia-smi; fi
@@ -128,9 +107,6 @@ if [ -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.470.256.02 ]; then
   ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so 2>&1 | head -n 5 || true
   ldconfig 2>&1 | head -n 5 || true
 fi
-# Ensure PATH includes CUDA
-export PATH=/usr/local/cuda/bin:${PATH:-}
-export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
 # Use set +o pipefail for nvidia-smi | head to avoid SIGPIPE with pipefail
 set +o pipefail
 nvidia-smi -L 2>&1 | head -20 || { echo "ERROR: nvidia-smi failed. Check /dev/nvidia* passthrough (c 195:*, c 511:*)." ; ls -l /dev/nvidia* 2>&1 | head -20; ls -l /usr/bin/nvidia-smi* 2>&1 | head -n 20; exit 1; }
@@ -141,19 +117,17 @@ echo "  Checking both GK210 chips (expect 2 GPUs):"
 GPU_COUNT=$(nvidia-smi -L 2>&1 | grep -c "GPU [0-9]:" || true)
 set +o pipefail
 if [ "$GPU_COUNT" -ne 2 ]; then echo "WARNING: Expected 2 K80 GPUs, found $GPU_COUNT" >&2; fi
-nvcc --version 2>&1 | head -5 || echo "nvcc not yet in PATH"
-echo "  Pinned: CUDA $CUDA_REPO_VERSION + driver $NVIDIA_DRIVER_VERSION (cc $CUDA_ARCH)"
+echo "  Pinned: Vulkan + driver $NVIDIA_DRIVER_VERSION (470 EOL, CUDA monitoring only)"
+echo "  vulkaninfo --summary:"
+vulkaninfo --summary 2>&1 | head -n 60 || echo "vulkaninfo failed - check nvidia_icd.json and /dev/nvidia*"
+echo "  Vulkan devices via vulkaninfo:"
+vulkaninfo 2>&1 | grep -E "GPU|deviceName|driverID" | head -n 20 || true
 
-# --- 2. BUILD LLAMA.CPP (CUDA 11.8, cc 3.7) ---
-echo "[2/7] Cloning and building llama.cpp (CUDA $CUDA_MAJOR, cc $CUDA_ARCH)..."
-# CUDA 11.8 only supports gcc <= 11. Noble default is gcc 13, so install gcc-11 and use it
-apt-get install -y gcc-11 g++-11 2>&1 | tail -n 20 || true
-export CC=gcc-11
-export CXX=g++-11
-export CUDAHOSTCXX=g++-11
-export CUDAHOSTCC=gcc-11
-update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100 2>&1 | head -n 5 || true
-update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 100 2>&1 | head -n 5 || true
+# --- 2. BUILD LLAMA.CPP (VULKAN) ---
+echo "[2/7] Cloning and building llama.cpp (VULKAN)..."
+# Vulkan needs glslc (from glslang-tools/shaderc) - already installed above; verify
+command -v glslc >/dev/null 2>&1 || { echo "ERROR: glslc not found for Vulkan build" >&2; exit 1; }
+# No gcc-11 pin needed for Vulkan (noble gcc 13 is fine); ensure alternatives sane
 if [ ! -d "$LLAMA_CPP_DIR" ]; then
   git clone --depth=1 "$LLAMA_CPP_REPO" "$LLAMA_CPP_DIR"
 else
@@ -162,21 +136,14 @@ fi
 
 cd "$LLAMA_CPP_DIR"
 
-# K80 needs CUDA_ARCH 37, no FA (flash attention requires cc 7+), avoid tensor ops for MTP on Kepler
-# Use -allow-unsupported-compiler as fallback if gcc-11 not available
+# Vulkan-only: MTP works via Vulkan (no CUBLAS_STATUS_ARCH_MISMATCH on cc 3.7)
 cmake -S . -B build \
-  -DGGML_CUDA=ON \
-  -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH}" \
-  -DGGML_CUDA_FA=OFF \
-  -DGGML_CUDA_FA_ALL_QUANTS=OFF \
-  -DGGML_CUDA_FORCE_DMMV=ON \
-  -DGGML_CUDA_FORCE_MMQ=ON \
-  -DGGML_VULKAN=OFF \
+  -DGGML_VULKAN=ON \
+  -DGGML_CUDA=OFF \
   -DGGML_HIP=OFF \
-  -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler" \
   -DCMAKE_BUILD_TYPE=Release
 
-echo "[2/7] Building... (this can take 15-30 minutes with 12 cores, CUDA 11.8)"
+echo "[2/7] Building... (this can take 15-30 minutes with 12 cores, Vulkan)"
 TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
 AVAIL_MB=$(( TOTAL_MEM_KB / 1024 - 1024 ))
 if [ "$AVAIL_MB" -lt 1500 ]; then JOBS=1
@@ -238,18 +205,16 @@ if [ ! -f "${MODEL_DIR}/${ACTIVE_MODEL_FILE}" ]; then
 fi
 
 # --- 4. SYSTEMD SERVICE ---
-echo "[4/7] Creating systemd service for llama-server (CUDA)..."
+echo "[4/7] Creating systemd service for llama-server (Vulkan)..."
 cat > "$SYSTEMD_SERVICE" << UNIT
 [Unit]
-Description=llama.cpp AI Engine (llama-server) - CUDA K80 on port 80 - pinned CUDA $CUDA_REPO_VERSION + driver $NVIDIA_DRIVER_VERSION
+Description=llama.cpp AI Engine (llama-server) - Vulkan K80 on port 80 - driver $NVIDIA_DRIVER_VERSION (vulkan-only, MTP enabled)
 After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=${LLAMA_CPP_DIR}/build/bin
-Environment=PATH=/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib
-Environment=CUDA_VISIBLE_DEVICES=0,1
+Environment=VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json
 ExecStart=${LLAMA_CPP_DIR}/build/bin/llama-server \\
   --model ${MODEL_DIR}/${ACTIVE_MODEL_FILE} \\
   --host 0.0.0.0 --port 80 \\
@@ -269,19 +234,20 @@ UNIT
 
 # --- 5. MODEL SWITCH SCRIPT (K80 dual GK210 - single source) ---
 # Single script: /usr/local/bin/k80-switch-model.sh + /srv/ai/models/k80-switch-model.sh
-# Refactored from hlh-ai-engine switch-model.sh v1.7.0, tuned for K80 CUDA 11.8 cc 3.7
+# Refactored from hlh-ai-engine switch-model.sh v1.7.0, tuned for K80 Vulkan (MTP enabled)
 # Changes vs upstream: banner/K80 VRAM table (2x12GB=24GB), -ngl 99, --batch-size 512,
-# no --device/Vulkan pin (CUDA uses CUDA_VISIBLE_DEVICES=0,1), verify via nvidia-smi.
-echo "[5/7] Creating model switcher: $SWITCH_SCRIPT (Tesla K80 dual GK210) -> $SHARED_SWITCH_SCRIPT..."
+# vulkan verify via vulkaninfo, nvidia-smi for monitoring only.
+echo "[5/7] Creating model switcher: $SWITCH_SCRIPT (Tesla K80 dual GK210 Vulkan) -> $SHARED_SWITCH_SCRIPT..."
 cat > "$SWITCH_SCRIPT" << 'EOS'
 #!/usr/bin/env bash
 # k80-switch-model.sh
-# Version: 1.7.0-k80
-# Description: Interactive model switcher for llama.cpp ai-engine service (Tesla K80 dual GK210)
+# Version: 2.0.0-k80-vulkan
+# Description: Interactive model switcher for llama.cpp ai-engine service (Tesla K80 dual GK210 Vulkan)
 # Supports: model selection, ctx-size, KV cache quantization, speculative decoding method (MTP draft / ngram / none)
-# Refactored from hlh-ai-engine switch-model.sh v1.7.0 for K80 CUDA 11.8 + 470.256.02 cc 3.7
-# K80 dual: 2x GK210GL 12GB per chip = 24GB board via OCuLink, split via CUDA_VISIBLE_DEVICES=0,1
+# Refactored from hlh-ai-engine switch-model.sh v1.7.0 for K80 Vulkan + 470.256.02 (MTP enabled via Vulkan)
+# K80 dual: 2x GK210GL 12GB per chip = 24GB board via OCuLink, Vulkan devices 0,1 (not CUDA_VISIBLE_DEVICES)
 # Changelog:
+#   2.0.0-k80-vulkan - Vulkan-only: banner 24GB, -ngl 99, --batch-size 512, verify via vulkaninfo + nvidia-smi monitoring
 #   1.7.0-k80 - Fork v1.7.0: K80 dual VRAM table (24GB), -ngl 99, --batch-size 512, no --device pin,
 #             verify via nvidia-smi, shared copy at /srv/ai/models/k80-switch-model.sh for MI60 reuse
 #   1.7.0 - (upstream) Removed DFlash2 support
@@ -348,9 +314,10 @@ rewrite_execstart() {
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════════╗"
-echo "║              k80-switch-model.sh (Tesla K80 dual GK210)         ║"
+echo "║        k80-switch-model.sh (Tesla K80 dual GK210 VULKAN)        ║"
 echo "╠══════════════════════════════════════════════════════════════════╣"
-echo "║  VRAM BUDGET  K80 dual 2×12GB = 24GB board (split 0,1)           ║"
+echo "║  BACKEND  VULKAN (MTP enabled)  CUDA only for nvidia-smi/nvtop  ║"
+echo "║  VRAM BUDGET  K80 dual 2×12GB = 24GB board (Vulkan devices 0,1)  ║"
 echo "║  Model Weights (fixed) + KV cache (scales with ctx) = total     ║"
 echo "║    70B Q2_K      ~17 GB   70B Q3_K_M   ~26 GB                    ║"
 echo "║    70B Q4_K_M    ~38 GB   70B Q6_K     ~54 GB                    ║"
@@ -371,7 +338,6 @@ CUR_KV_K=$( grep -- '--cache-type-k '  "$SYSTEMD_SERVICE" | awk '{for(i=1;i<=NF;
 CUR_KV_V=$( grep -- '--cache-type-v '  "$SYSTEMD_SERVICE" | awk '{for(i=1;i<=NF;i++) if ($i=="--cache-type-v")  print $(i+1)}') || CUR_KV_V="(not set)"
 CUR_SPEC=$( grep -- '--spec-type '     "$SYSTEMD_SERVICE" | awk '{for(i=1;i<=NF;i++) if ($i=="--spec-type")     print $(i+1)}') || CUR_SPEC="none"
 CUR_SPEC="${CUR_SPEC:-none}"
-CUR_CUDA_VISIBLE=$(grep -E '^Environment=CUDA_VISIBLE_DEVICES' "$SYSTEMD_SERVICE" | cut -d= -f2- || echo "0,1")
 K80_COUNT=$(nvidia-smi -L 2>&1 | grep -c "GPU [0-9]:" || echo "?")
 
 echo "  Model directory : $MODEL_DIR"
@@ -379,9 +345,11 @@ echo "  Currently active: $CUR_MODEL"
 echo "  ctx-size        : ${CUR_CTX:-(not set)}"
 echo "  KV cache (K/V)  : ${CUR_KV_K} / ${CUR_KV_V}"
 echo "  Spec decode     : $CUR_SPEC"
-echo "  CUDA_VISIBLE    : $CUR_CUDA_VISIBLE ($K80_COUNT K80 GPUs)"
+echo "  Vulkan devices  : $(vulkaninfo --summary 2>&1 | grep -c "GPU" || echo "?") (nvidia-smi shows $K80_COUNT K80 GPUs)"
 echo "  nvidia-smi      :"
 nvidia-smi -L 2>&1 | sed 's/^/    /' || echo "    nvidia-smi failed"
+echo "  vulkaninfo      :"
+vulkaninfo --summary 2>&1 | sed 's/^/    /' | head -n 20 || echo "    vulkaninfo failed"
 echo ""
 
 mapfile -t MODELS < <(find "$MODEL_DIR" -maxdepth 1 -type f -name '*.gguf' | sort)
@@ -461,7 +429,7 @@ if is_mtp_model "$NEW_MODEL"; then
   DEFAULT_SPEC=1
   echo ""
   echo "Speculative decoding method:"
-  echo "   1) MTP draft     — use the model's MTP heads (default, n-max $MTP_DRAFT_N_MAX)"
+  echo "   1) MTP draft     — use the model's MTP heads (default, n-max $MTP_DRAFT_N_MAX) [Vulkan OK]"
   echo "   2) ngram-mod     — n-gram matching, self-speculative (tunable)"
   echo "   3) ngram-map-k4v — n-gram keys + 4 m-gram values"
   echo "   4) ngram-map-k   — n-gram keys only"
@@ -556,7 +524,7 @@ if [ "$OK" = "1" ]; then
   echo "  [✓] Service     : $SERVICE running (health OK)"
   echo ""
   echo "  Web UI ready at       : http://$(hostname -I | awk '{print $1}'):80"
-  echo "  Verify GPU usage with  : nvidia-smi"
+  echo "  Verify GPU usage with  : nvidia-smi; nvtop; vulkaninfo --summary"
   echo "  Watch logs with       : journalctl -u $SERVICE -f"
 else
   echo "  [✗] WARNING: $SERVICE did not start cleanly after switch!"
@@ -580,10 +548,13 @@ systemctl enable --now "$SERVICE_NAME"
 # --- 7. VERIFICATION ---
 echo "[7/7] Verifying..."
 nvidia-smi 2>&1 | head -20 || true
+vulkaninfo --summary 2>&1 | head -n 40 || true
+nvtop --version 2>&1 | head -n 5 || echo "nvtop: $(which nvtop || echo not found)"
 ${LLAMA_CPP_DIR}/build/bin/llama-server --version 2>&1 | head -5 || true
 systemctl status "$SERVICE_NAME" --no-pager | head -30
 echo ""
-echo "[Bootstrap complete - k80 CUDA 11.8 + 470.256.02, cc 3.7 dual-GK210]"
+echo "[Bootstrap complete - k80 Vulkan + 470.256.02 monitoring, dual-GK210 MTP enabled]"
 echo "  Web UI: http://<container-ip>:80 (LXC 131 -> 192.168.1.31:80)"
-echo "  Switch: k80-switch-model.sh (also /srv/ai/models/k80-switch-model.sh for MI60 reuse)"
-echo "  Pinned: CUDA $CUDA_REPO_VERSION + driver $NVIDIA_DRIVER_VERSION"
+echo "  Switch: k80-switch-model.sh (also /srv/ai/models/k80-switch-model.sh)"
+echo "  Backend: Vulkan (MTP) + driver $NVIDIA_DRIVER_VERSION for nvidia-smi/nvtop"
+echo "  Verify: vulkaninfo --summary; nvidia-smi -L; nvtop"

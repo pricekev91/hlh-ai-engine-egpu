@@ -9,24 +9,25 @@ usage() {
 Usage:
 	./deploy-hlh-ai-engine-k80.sh [--skip-host-driver]
 
-K80 eGPU path (Tesla K80 GK210GL dual-GPU via OCuLink):
-	1) Verify/install NVIDIA 470 + CUDA 11.8 on Proxmox host (pinned)
+K80 eGPU path (Tesla K80 GK210GL dual-GPU via OCuLink) - VULKAN ONLY:
+	1) Verify/install NVIDIA 470 on Proxmox host (pinned, for Vulkan + nvidia-smi/nvtop)
 	2) Create privileged LXC 131 (hlh-ai-engine-k80) at 192.168.1.31
 	3) Add cgroup + /dev/nvidia* bind-mounts for both GK210 chips (c7 + c8)
-	4) Start container + push/run CUDA bootstrap (GGML_CUDA=ON, cc 3.7)
+	4) Start container + push/run Vulkan bootstrap (GGML_VULKAN=ON, MTP enabled)
 
 NOTES:
 	- Single OCuLink slot: LXC 130 (vulkan) and 131 (k80) cannot run together.
 	  The script stops 130 if running and documents manual swap.
-	- K80 is Kepler (cc 3.7) EOL: latest driver 470.256.02 + CUDA 11.8 is pinned.
-	  CUDA 12+ drops Kepler. Host needs nouveau blacklisted + reboot.
+	- K80 is Kepler (cc 3.7) EOL: latest driver 470.256.02 pinned for Vulkan + nvidia-smi/nvtop.
+	  CUDA toolkit NOT installed in LXC (vulkan-only; MTP via CUDA fails CUBLAS_STATUS_ARCH_MISMATCH on cc 3.7).
+	  CUDA is monitoring-only on host. Host needs nouveau blacklisted + reboot.
 EOF
 }
 
 # --- PINNED VERSIONS (K80) ---
-NVIDIA_TESLA_470_VERSION="470.256.02-1~deb11u2"  # Debian bullseye nvidia-tesla-470-driver
+NVIDIA_TESLA_470_VERSION="470.256.02-1~deb11u2"  # Debian bullseye nvidia-tesla-470-driver (host)
 NVIDIA_TESLA_470_VERSION_SHORT="470.256.02"
-CUDA_VERSION="11.8.0-1"                         # CUDA 11.8 from NVIDIA repo (ubuntu2404/debian13)
+CUDA_VERSION="11.8.0-1"                         # Retained for host description only - LXC is vulkan-only
 CUDA_MAJOR="11.8"
 DRIVER_BRANCH="470"
 
@@ -74,7 +75,7 @@ get_iommu_for() { readlink "/sys/bus/pci/devices/$1/iommu_group" 2>/dev/null || 
 
 # --- 0/6 Host driver (pinned) ---
 if [[ "$SKIP_HOST_DRIVER" == "false" ]]; then
-	echo "[0/6] Host NVIDIA driver check (pinned: nvidia-tesla-470 $NVIDIA_TESLA_470_VERSION_SHORT + CUDA $CUDA_MAJOR)..."
+	echo "[0/6] Host NVIDIA driver check (pinned: nvidia-tesla-470 $NVIDIA_TESLA_470_VERSION_SHORT Vulkan + nvidia-smi/nvtop, no CUDA toolkit in LXC)..."
 	if lsmod | grep "nvidia" >/dev/null && modinfo nvidia 2>/dev/null | grep "$DRIVER_BRANCH" >/dev/null; then
 		echo "  Host driver already loaded: $(modinfo nvidia 2>/dev/null | grep ^version: | head -1)"
 		set +o pipefail; nvidia-smi 2>&1 | head -5 || true; set -o pipefail
@@ -194,18 +195,18 @@ pct create "${LXC_ID}" "${LXC_IMAGE}" \
 	--unprivileged 0 \
 	--onboot 1 \
 	--mp0 "${MODEL_HOST_DIR},mp=${MODEL_LXC_DIR}" \
-	--description "llama.cpp AI engine with CUDA 11.8 + driver 470.256.02 for Tesla K80 (GK210 dual cc 3.7) via OCuLink, model storage on ${POOL} — pinned CUDA $CUDA_VERSION"
+	--description "llama.cpp AI engine Vulkan + driver 470.256.02 for Tesla K80 (GK210 dual cc 3.7) via OCuLink, model storage on ${POOL} — vulkan-only MTP, CUDA monitoring only"
 
-echo "[3/6] Adding K80 CUDA passthrough (dual GK210 + UVM)..."
+echo "[3/6] Adding K80 Vulkan passthrough (dual GK210 + UVM, monitoring via nvidia-smi/nvtop)..."
 # K80 presents as two PCI devices (c7/c8) but LXC passthrough is via /dev, not hostpci.
 # Host /dev/nvidia* is created by nvidia driver after modprobe; expose via cgroup + bind-mount.
-# We use allow-all for 195 (nvidia) and 511 (nvidia-uvm) and mount the 5 nodes.
+# Vulkan ICD (nvidia_icd.json) uses /dev/nvidia* same as CUDA; keep cgroup for 195/51x.
 # If host uses 510 for uvm, the optional mount covers it.
 cat >> "/etc/pve/lxc/${LXC_ID}.conf" <<'LXCCONF'
 
-# K80 Tesla GK210 dual-GPU (cc 3.7) — CUDA 11.8 + driver 470.256.02 pinned
+# K80 Tesla GK210 dual-GPU (cc 3.7) — Vulkan + driver 470.256.02 pinned, CUDA monitoring only
 # c7:00.0 + c8:00.0 (10de:102d) share OCuLink switch; IOMMU groups 23/24 separate
-# Expose both chips as nvidia0 + nvidia1 plus control nodes
+# Expose both chips as nvidia0 + nvidia1 plus control nodes (Vulkan + nvidia-smi/nvtop)
 lxc.cgroup2.devices.allow: c 195:* rwm
 lxc.cgroup2.devices.allow: c 507:* rwm
 lxc.cgroup2.devices.allow: c 510:* rwm
@@ -222,7 +223,7 @@ echo "[4/6] Starting LXC ${LXC_ID}..."
 pct start "${LXC_ID}"
 sleep 5
 
-echo "[5/6] Running in-container CUDA bootstrap (pinned: CUDA $CUDA_VERSION, driver $DRIVER_BRANCH)..."
+echo "[5/6] Running in-container Vulkan bootstrap (Vulkan-only, driver $DRIVER_BRANCH for nvidia-smi/nvtop)..."
 pct exec "${LXC_ID}" -- mkdir -p /root/ai-engine-bootstrap
 pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh --perms 0755
 pct push "${LXC_ID}" "/usr/bin/nvidia-smi" "/tmp/nvidia-smi" --perms 0755
@@ -231,6 +232,6 @@ pct exec "${LXC_ID}" -- bash /root/ai-engine-bootstrap/configure-ai-engine-insid
 echo "[6/6] Deployment complete. LXC ${LXC_ID} (${LXC_NAME}) is running."
 echo "Model storage: ${MODEL_HOST_DIR} (host) <-> ${MODEL_LXC_DIR} (container) on ${POOL}"
 echo "Access llama-server at http://192.168.1.31:80"
-echo "Host driver pinned: $NVIDIA_TESLA_470_VERSION_SHORT (470) + CUDA $CUDA_VERSION"
-echo "Verify inside LXC: nvidia-smi -L && nvidia-smi && /opt/llama.cpp/build/bin/llama-server --list-devices"
+echo "Host driver pinned: $NVIDIA_TESLA_470_VERSION_SHORT (470) Vulkan-only, CUDA monitoring only"
+echo "Verify inside LXC: nvidia-smi -L && nvidia-smi && vulkaninfo --summary && nvtop && /opt/llama.cpp/build/bin/llama-server --version"
 echo "Note: Single OCuLink slot — stop 131 before starting 130: pct stop 131 && pct start 130"
