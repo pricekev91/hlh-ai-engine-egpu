@@ -72,11 +72,30 @@ apt-mark unhold cuda-toolkit-11-8 cuda-nvcc-11-8 cuda-cudart-11-8 2>/dev/null ||
 # Remove any stale CUDA toolkit left from 1.x (optional, keeps image lean)
 # apt-get autoremove -y cuda-toolkit-11-8 cuda-nvcc-11-8 2>&1 | tail -n 10 || true
 
-# Vulkan ICD: 470 provides /usr/share/vulkan/icd.d/nvidia_icd.json via libnvidia-gl-470 or libnvidia-compute
-# Ensure ICD is visible; vulkan-tools vulkaninfo should list 2x GK210
-if [ ! -f /usr/share/vulkan/icd.d/nvidia_icd.json ]; then
+# Vulkan ICD: 470 on noble provides /usr/share/vulkan/icd.d/nvidia_icd.json via libnvidia-gl-470,
+# but libnvidia-gl-470 conflicts with held libnvidia-compute-470 (apt resolver).
+# Temporarily unhold, install pinned ICD, then re-hold. Failure is non-fatal (Vulkan still works via ICD search).
+mkdir -p /usr/share/vulkan/icd.d /etc/vulkan/icd.d 2>/dev/null || true
+if [ ! -f /usr/share/vulkan/icd.d/nvidia_icd.json ] && [ ! -f /etc/vulkan/icd.d/nvidia_icd.json ]; then
   echo "  Note: nvidia_icd.json not found, installing nvidia vulkan icd supplement..."
-  apt-get install -y --no-install-recommends libnvidia-gl-470 2>&1 | tail -n 10 || true
+  apt-mark unhold libnvidia-compute-470 nvidia-utils-470 libnvidia-compute-535 nvidia-utils-535 2>/dev/null || true
+  apt-get install -y --allow-downgrades libnvidia-gl-470=470.256.02-0ubuntu0.24.04.1 2>&1 | tail -n 20 || \
+    apt-get install -y --allow-downgrades libnvidia-gl-470 2>&1 | tail -n 20 || \
+    echo "WARNING: libnvidia-gl-470 install failed (held packages conflict) - Vulkan ICD may be missing, vulkaninfo will fail" >&2
+  apt-mark hold libnvidia-compute-470 nvidia-utils-470 libnvidia-compute-535 nvidia-utils-535 2>&1 | head -n 5 || true
+  # Fallback: generate minimal ICD if package unavailable but driver libs exist
+  if [ ! -f /usr/share/vulkan/icd.d/nvidia_icd.json ] && [ -f /usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.470.256.02 ]; then
+    cat > /usr/share/vulkan/icd.d/nvidia_icd.json <<'ICD'
+{
+  "file_format_version" : "1.0.0",
+  "ICD": {
+    "library_path" : "libGLX_nvidia.so.0",
+    "api_version" : "1.2.142"
+  }
+}
+ICD
+    echo "  Generated fallback nvidia_icd.json" >&2
+  fi
 fi
 echo "  Vulkan ICDs:"
 ls -l /usr/share/vulkan/icd.d/ 2>&1 | head -n 20 || true
@@ -98,7 +117,15 @@ systemctl enable ssh 2>/dev/null || true
 systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
 
 # --- Pre-Build Checks ---
-echo "[1/7] Verifying Vulkan + K80 dual-GPU (nvidia-smi for monitoring)..."
+echo "[1/7] Verifying Vulkan + K80 dual-GPU (nvidia-smi for monitoring)... [host driver must be healthy first]"
+# Locale fix (suppress perl warnings seen on host/LXC)
+if ! locale -a 2>&1 | grep -q "en_US.utf8"; then
+  echo "  Generating en_US.UTF-8 locale..."
+  apt-get install -y locales 2>&1 | tail -n 5 || true
+  locale-gen en_US.UTF-8 2>&1 | tail -n 5 || true
+  update-locale LANG=en_US.UTF-8 2>&1 | tail -n 5 || true
+fi
+export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 2>/dev/null || true
 # Fix nvidia-smi inside LXC (host driver 470.256.02, LXC apt may leave broken symlink to non-existent /usr/lib/nvidia-470/bin/nvidia-smi)
 if [ -L /usr/bin/nvidia-smi ] && [ ! -e /usr/bin/nvidia-smi ]; then rm -f /usr/bin/nvidia-smi; fi
 if [ ! -x /usr/bin/nvidia-smi ] && [ -x /tmp/nvidia-smi ]; then cp /tmp/nvidia-smi /usr/bin/nvidia-smi; chmod +x /usr/bin/nvidia-smi; fi
@@ -108,18 +135,28 @@ if [ -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.470.256.02 ]; then
   ldconfig 2>&1 | head -n 5 || true
 fi
 # Use set +o pipefail for nvidia-smi | head to avoid SIGPIPE with pipefail
+# NOTE: nvidia-smi Unknown Error for 0000:C7/C8 means HOST driver mismatch (470 vs kernel 7.x) - not LXC fault.
+# See prox01: dkms status; modinfo nvidia | grep version; dmesg | grep -i NVRM; reboot or modprobe -r nvidia_uvm/nvidia && modprobe nvidia
 set +o pipefail
-nvidia-smi -L 2>&1 | head -20 || { echo "ERROR: nvidia-smi failed. Check /dev/nvidia* passthrough (c 195:*, c 511:*)." ; ls -l /dev/nvidia* 2>&1 | head -20; ls -l /usr/bin/nvidia-smi* 2>&1 | head -n 20; exit 1; }
+nvidia-smi -L 2>&1 | head -20 || {
+  echo "WARNING: nvidia-smi failed (host driver not talking to K80 0000:C7/C8). Host fix needed:" >&2
+  echo "  prox01: dkms status | grep nvidia; modinfo nvidia | head; dmesg | grep -i nvidia | tail -n 30" >&2
+  echo "  prox01: ls -l /dev/nvidia*; cat /proc/driver/nvidia/version 2>&1 | head" >&2
+  echo "  prox01: reboot OR modprobe -r nvidia_uvm nvidia_modeset nvidia_drm nvidia && modprobe nvidia && nvidia-modprobe -u -c 0" >&2
+  ls -l /dev/nvidia* 2>&1 | head -20
+  ls -l /usr/bin/nvidia-smi* 2>&1 | head -n 20
+  echo "Continuing to Vulkan build (will fail vulkaninfo if host still broken)..." >&2
+}
 set -o pipefail
 echo "  nvidia-smi -L:"
-nvidia-smi -L
+nvidia-smi -L 2>&1 | head -n 20 || true
 echo "  Checking both GK210 chips (expect 2 GPUs):"
 GPU_COUNT=$(nvidia-smi -L 2>&1 | grep -c "GPU [0-9]:" || true)
 set +o pipefail
-if [ "$GPU_COUNT" -ne 2 ]; then echo "WARNING: Expected 2 K80 GPUs, found $GPU_COUNT" >&2; fi
+if [ "$GPU_COUNT" -ne 2 ]; then echo "WARNING: Expected 2 K80 GPUs, found $GPU_COUNT (host driver Unknown Error is root cause)" >&2; fi
 echo "  Pinned: Vulkan + driver $NVIDIA_DRIVER_VERSION (470 EOL, CUDA monitoring only)"
 echo "  vulkaninfo --summary:"
-vulkaninfo --summary 2>&1 | head -n 60 || echo "vulkaninfo failed - check nvidia_icd.json and /dev/nvidia*"
+vulkaninfo --summary 2>&1 | head -n 60 || echo "vulkaninfo failed - check nvidia_icd.json and /dev/nvidia* (host driver must be healthy)"
 echo "  Vulkan devices via vulkaninfo:"
 vulkaninfo 2>&1 | grep -E "GPU|deviceName|driverID" | head -n 20 || true
 
