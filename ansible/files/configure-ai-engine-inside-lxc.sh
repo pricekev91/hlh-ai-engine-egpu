@@ -28,14 +28,23 @@ SHARED_SWITCH_SCRIPT="${MODEL_DIR}/k80-switch-model.sh"
 
 # --- 1. BASE DEPENDENCIES + VULKAN + 470 USERSPACE (for nvidia-smi/nvtop) ---
 echo "[1/7] Installing base dependencies + Vulkan + 470 userspace (monitoring)..."
+# Locale + noninteractive to silence perl warnings (seen every apt run)
+export DEBIAN_FRONTEND=noninteractive
+export LANG=C LC_ALL=C
+if ! locale -a 2>&1 | grep -qi "en_US.utf8"; then
+  apt-get update && apt-get install -y locales 2>&1 | tail -n 5 || true
+  locale-gen en_US.UTF-8 2>&1 | tail -n 5 || true
+  update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 2>&1 | tail -n 5 || true
+fi
+export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 2>/dev/null || true
 apt-get update
 apt-get install -y --no-install-recommends \
   build-essential git cmake pkg-config \
   python3 python3-pip curl wget unzip bc \
   libopenblas-dev libssl-dev ca-certificates gnupg \
   openssh-server \
-  libvulkan1 vulkan-tools glslc glslang-tools spirv-tools \
-  libvulkan-dev
+  libvulkan1 vulkan-tools glslc glslang-tools spirv-tools spirv-headers \
+  libvulkan-dev glslang-dev
 
 # Clean up stale CUDA repos/pins from previous 1.x deploys (vulkan-only now)
 rm -f /etc/apt/sources.list.d/cuda-ubuntu2204.list /etc/apt/sources.list.d/cuda-debian13.list 2>/dev/null || true
@@ -73,16 +82,27 @@ apt-mark unhold cuda-toolkit-11-8 cuda-nvcc-11-8 cuda-cudart-11-8 2>/dev/null ||
 # apt-get autoremove -y cuda-toolkit-11-8 cuda-nvcc-11-8 2>&1 | tail -n 10 || true
 
 # Vulkan ICD: 470 on noble provides /usr/share/vulkan/icd.d/nvidia_icd.json via libnvidia-gl-470,
-# but libnvidia-gl-470 conflicts with held libnvidia-compute-470 (apt resolver).
-# Temporarily unhold, install pinned ICD, then re-hold. Failure is non-fatal (Vulkan still works via ICD search).
+# but libnvidia-gl-470 conflicts with held libnvidia-compute-470 (apt resolver) and pulls 580/535 alongside 470.
+# Temporarily unhold, install pinned ICD, purge 580/535 contamination, then re-hold.
 mkdir -p /usr/share/vulkan/icd.d /etc/vulkan/icd.d 2>/dev/null || true
 if [ ! -f /usr/share/vulkan/icd.d/nvidia_icd.json ] && [ ! -f /etc/vulkan/icd.d/nvidia_icd.json ]; then
   echo "  Note: nvidia_icd.json not found, installing nvidia vulkan icd supplement..."
-  apt-mark unhold libnvidia-compute-470 nvidia-utils-470 libnvidia-compute-535 nvidia-utils-535 2>/dev/null || true
+  apt-mark unhold libnvidia-compute-470 nvidia-utils-470 libnvidia-compute-535 nvidia-utils-535 libnvidia-compute-580 nvidia-utils-580 2>/dev/null || true
   apt-get install -y --allow-downgrades libnvidia-gl-470=470.256.02-0ubuntu0.24.04.1 2>&1 | tail -n 20 || \
     apt-get install -y --allow-downgrades libnvidia-gl-470 2>&1 | tail -n 20 || \
     echo "WARNING: libnvidia-gl-470 install failed (held packages conflict) - Vulkan ICD may be missing, vulkaninfo will fail" >&2
-  apt-mark hold libnvidia-compute-470 nvidia-utils-470 libnvidia-compute-535 nvidia-utils-535 2>&1 | head -n 5 || true
+  # Purge 580/535 that apt drags in alongside 470 (causes NVML 580.173 mismatch vs 470 kernel + Vulkan loader picking 580's libGLX)
+  echo "  Purging 580/535 contamination (keep 470 only)..."
+  apt-get purge -y libnvidia-compute-580 nvidia-utils-580 libnvidia-compute-535 nvidia-utils-535 2>&1 | tail -n 20 || true
+  apt-get autoremove -y 2>&1 | tail -n 10 || true
+  # Re-ensure 470 is correct after purge (symlinks may have flipped to 580)
+  apt-get install -y --allow-downgrades --no-install-recommends libnvidia-compute-470=470.256.02-0ubuntu0.24.04.1 nvidia-utils-470=470.256.02-0ubuntu0.24.04.1 2>&1 | tail -n 20 || true
+  if [ -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.470.256.02 ]; then
+    ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 2>&1 | head -n 5 || true
+    ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so 2>&1 | head -n 5 || true
+    ldconfig 2>&1 | head -n 5 || true
+  fi
+  apt-mark hold libnvidia-compute-470 nvidia-utils-470 libnvidia-compute-535 nvidia-utils-535 libnvidia-compute-580 nvidia-utils-580 2>&1 | head -n 5 || true
   # Fallback: generate minimal ICD if package unavailable but driver libs exist
   if [ ! -f /usr/share/vulkan/icd.d/nvidia_icd.json ] && [ -f /usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.470.256.02 ]; then
     cat > /usr/share/vulkan/icd.d/nvidia_icd.json <<'ICD'
@@ -97,9 +117,24 @@ ICD
     echo "  Generated fallback nvidia_icd.json" >&2
   fi
 fi
+# Fix ICD library_path: generic libGLX_nvidia.so.0 may resolve to 580 after multi-version install; pin to 470
+if [ -f /usr/share/vulkan/icd.d/nvidia_icd.json ]; then
+  if grep -q '"library_path" : "libGLX_nvidia.so.0"' /usr/share/vulkan/icd.d/nvidia_icd.json 2>/dev/null; then
+    # Prefer explicit 470 path if exists
+    if [ -f /usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.470.256.02 ]; then
+      sed -i 's#"library_path" : "libGLX_nvidia.so.0"#"library_path" : "/usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.470.256.02"#' /usr/share/vulkan/icd.d/nvidia_icd.json || true
+      echo "  Patched ICD library_path to 470 explicit" >&2
+    fi
+  fi
+  cat /usr/share/vulkan/icd.d/nvidia_icd.json 2>&1 | head -n 20 || true
+fi
 echo "  Vulkan ICDs:"
 ls -l /usr/share/vulkan/icd.d/ 2>&1 | head -n 20 || true
 ls -l /etc/vulkan/icd.d/ 2>&1 | head -n 20 || true
+# Final NVML sanity: ensure 580 not present
+dpkg -l | grep -E "libnvidia-compute|nvidia-utils" 2>&1 | head -n 20 || true
+ls -l /usr/lib/x86_64-linux-gnu/libnvidia-ml.so* 2>&1 | head -n 20 || true
+ldconfig -p 2>&1 | grep -E "libnvidia-ml|libGLX_nvidia" | head -n 20 || true
 
 # Groups for GPU (nvidia)
 usermod -aG render root || true
@@ -118,13 +153,7 @@ systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
 
 # --- Pre-Build Checks ---
 echo "[1/7] Verifying Vulkan + K80 dual-GPU (nvidia-smi for monitoring)... [host driver must be healthy first]"
-# Locale fix (suppress perl warnings seen on host/LXC)
-if ! locale -a 2>&1 | grep -q "en_US.utf8"; then
-  echo "  Generating en_US.UTF-8 locale..."
-  apt-get install -y locales 2>&1 | tail -n 5 || true
-  locale-gen en_US.UTF-8 2>&1 | tail -n 5 || true
-  update-locale LANG=en_US.UTF-8 2>&1 | tail -n 5 || true
-fi
+# Locale already fixed at top; ensure exports persist
 export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 2>/dev/null || true
 # Fix nvidia-smi inside LXC (host driver 470.256.02, LXC apt may leave broken symlink to non-existent /usr/lib/nvidia-470/bin/nvidia-smi)
 if [ -L /usr/bin/nvidia-smi ] && [ ! -e /usr/bin/nvidia-smi ]; then rm -f /usr/bin/nvidia-smi; fi
