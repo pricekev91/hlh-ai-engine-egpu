@@ -307,16 +307,17 @@ echo "[5/7] Creating model switcher: $SWITCH_SCRIPT (Tesla K80 dual GK210 Vulkan
 cat > "$SWITCH_SCRIPT" << 'EOS'
 #!/usr/bin/env bash
 # k80-switch-model.sh
-# Version: 2.0.0-k80-vulkan
-# Description: Interactive model switcher for llama.cpp ai-engine service (Tesla K80 dual GK210 Vulkan)
-# Supports: model selection, ctx-size, KV cache quantization, speculative decoding method (MTP draft / ngram / none)
-# Refactored from hlh-ai-engine switch-model.sh v1.7.0 for K80 Vulkan + 470.256.02 (MTP enabled via Vulkan)
-# K80 dual: 2x GK210GL 12GB per chip = 24GB board via OCuLink, Vulkan devices 0,1 (not CUDA_VISIBLE_DEVICES)
+# Version: 2.1.0-k80-vulkan
+#   2.1.0-k80-vulkan - Merge hlh 1.6.3 into k80 2.0.0: add hlh features (selectable -ngl 99/75/50/25/custom,
+#                     MTP n-max prompt 1-16, final command breakdown, draft/ngl state) but keep K80 Vulkan
+#                     dual GK210 24GB, batch 512, nvidia-smi/nvtop/vulkaninfo, no ROCm/DFlash optional
+# Description: Interactive model switcher for llama.cpp ai-engine service (Tesla K80 dual GK210 Vulkan egpu)
+# Supports: model selection, ctx-size, KV cache quantization, speculative decoding method (MTP draft / ngram / DFlash / none)
 # Changelog:
+#   2.1.0-k80-vulkan - Merge from hlh 1.6.3 + k80 2.0.0: selectable ngl, MTP n-max prompt, breakdown, keep Vulkan MTP
 #   2.0.0-k80-vulkan - Vulkan-only: banner 24GB, -ngl 99, --batch-size 512, verify via vulkaninfo + nvidia-smi monitoring
-#   1.7.0-k80 - Fork v1.7.0: K80 dual VRAM table (24GB), -ngl 99, --batch-size 512, no --device pin,
-#             verify via nvidia-smi, shared copy at /srv/ai/models/k80-switch-model.sh for MI60 reuse
-#   1.7.0 - (upstream) Removed DFlash2 support
+#   1.6.3 - Added MTP draft n-max prompt (default 5 MoE / 3 dense); now prompts for token count after selecting MTP draft
+#   1.6.2 - Exposed -ngl as selectable variable (99/75/50/25/custom, default 99), added --flash-attn on, added final breakdown
 #   1.6.1 - Fixed readiness check: probe /health HTTP endpoint
 set -euo pipefail
 
@@ -328,19 +329,34 @@ MTP_DRAFT_N_MAX="${MTP_DRAFT_N_MAX:-}"
 NGRAM_N_MATCH="${NGRAM_N_MATCH:-24}"
 NGRAM_N_MIN="${NGRAM_N_MIN:-48}"
 NGRAM_N_MAX="${NGRAM_N_MAX:-64}"
+# DFlash draft n-max (kept from hlh, optional for k80 Vulkan if draft GGUF present)
+DFLASH_DRAFT_N_MAX="${DFLASH_DRAFT_N_MAX:-7}"
 
 is_mtp_model() {
   [[ "$(basename "$1")" =~ [Mm][Tt][Pp] ]]
+}
+is_dflash_model() {
+  [[ "$(basename "$1")" =~ [Dd][Ff]lash ]]
+}
+model_family() {
+  local base
+  base="$(basename "$1")"
+  base="${base%.gguf}"
+  base="${base%%-[Qq][0-9]*}"
+  base="${base%%-[Ii][Qq]*}"
+  base="${base%%-[Uu][Dd]*}"
+  base="${base%%-[Dd][Ff]lash*}"
+  echo "$base"
 }
 is_moe_model() {
   [[ "$(basename "$1")" =~ -A[0-9]+B- ]]
 }
 rewrite_execstart() {
-  local model="$1" ctx="$2" kv="$3" spec_flags="$4"
+  local model="$1" ctx="$2" kv="$3" spec_flags="$4" ngl="$5"
   local tmp_file
   tmp_file="$(mktemp)"
   cp "$SYSTEMD_SERVICE" "${SYSTEMD_SERVICE}.backup.$(date +%s)"
-  awk -v model="$model" -v ctx="$ctx" -v kv="$kv" -v spec_flags="$spec_flags" '
+  awk -v model="$model" -v ctx="$ctx" -v kv="$kv" -v spec_flags="$spec_flags" -v ngl="$ngl" '
     BEGIN { in_block=0; done=0 }
     /^ExecStart=.*llama-server/ {
       done=1
@@ -348,7 +364,7 @@ rewrite_execstart() {
       print "  --model " model " \\"
       print "  --host 0.0.0.0 --port 80 \\"
       print "  --ctx-size " ctx " \\"
-      print "  -ngl 99 \\"
+      print "  -ngl " ngl " \\"
       print "  --batch-size 512 \\"
       print "  --cache-type-k " kv " \\"
       if (spec_flags != "") {
@@ -380,7 +396,7 @@ rewrite_execstart() {
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════════╗"
-echo "║        k80-switch-model.sh (Tesla K80 dual GK210 VULKAN)        ║"
+echo "║        k80-switch-model.sh (Tesla K80 dual GK210 VULKAN egpu)   ║"
 echo "╠══════════════════════════════════════════════════════════════════╣"
 echo "║  BACKEND  VULKAN (MTP enabled)  CUDA only for nvidia-smi/nvtop  ║"
 echo "║  VRAM BUDGET  K80 dual 2×12GB = 24GB board (Vulkan devices 0,1)  ║"
@@ -404,6 +420,8 @@ CUR_KV_K=$( grep -- '--cache-type-k '  "$SYSTEMD_SERVICE" | awk '{for(i=1;i<=NF;
 CUR_KV_V=$( grep -- '--cache-type-v '  "$SYSTEMD_SERVICE" | awk '{for(i=1;i<=NF;i++) if ($i=="--cache-type-v")  print $(i+1)}') || CUR_KV_V="(not set)"
 CUR_SPEC=$( grep -- '--spec-type '     "$SYSTEMD_SERVICE" | awk '{for(i=1;i<=NF;i++) if ($i=="--spec-type")     print $(i+1)}') || CUR_SPEC="none"
 CUR_SPEC="${CUR_SPEC:-none}"
+CUR_DRAFT=$(grep -- '--model-draft '  "$SYSTEMD_SERVICE" | awk '{for(i=1;i<=NF;i++) if ($i=="--model-draft")  print $(i+1)}') || CUR_DRAFT=""
+CUR_NGL=$(grep -oP '(?<=-ngl )\S+' "$SYSTEMD_SERVICE" 2>/dev/null | head -n1 || grep -- '-ngl ' "$SYSTEMD_SERVICE" | awk '{for(i=1;i<=NF;i++) if ($i=="-ngl") print $(i+1)}' ) || CUR_NGL="(not set)"
 K80_COUNT=$(nvidia-smi -L 2>&1 | grep -c "GPU [0-9]:" || echo "?")
 
 echo "  Model directory : $MODEL_DIR"
@@ -411,6 +429,8 @@ echo "  Currently active: $CUR_MODEL"
 echo "  ctx-size        : ${CUR_CTX:-(not set)}"
 echo "  KV cache (K/V)  : ${CUR_KV_K} / ${CUR_KV_V}"
 echo "  Spec decode     : $CUR_SPEC"
+echo "  Draft model     : ${CUR_DRAFT:-none}"
+echo "  -ngl (GPU layers): ${CUR_NGL:-(not set)}"
 echo "  Vulkan devices  : $(vulkaninfo --summary 2>&1 | grep -c "GPU" || echo "?") (nvidia-smi shows $K80_COUNT K80 GPUs)"
 echo "  nvidia-smi      :"
 nvidia-smi -L 2>&1 | sed 's/^/    /' || echo "    nvidia-smi failed"
@@ -428,6 +448,8 @@ echo "Available models:"
 for i in "${!MODELS[@]}"; do
   if is_mtp_model "${MODELS[$i]}"; then
     printf "  %2d) %s  [MTP]\n" $((i+1)) "${MODELS[$i]}"
+  elif is_dflash_model "${MODELS[$i]}"; then
+    printf "  %2d) %s  [DFlash]\n" $((i+1)) "${MODELS[$i]}"
   else
     printf "  %2d) %s\n" $((i+1)) "${MODELS[$i]}"
   fi
@@ -439,6 +461,18 @@ if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || (( CHOICE < 1 || CHOICE > ${#MODELS[@]} )); 
   exit 1
 fi
 NEW_MODEL="${MODELS[$((CHOICE-1))]}"
+
+# DFlash draft pairing (from hlh, optional for k80 if draft present)
+DFLASH_DRAFT=""
+if ! is_dflash_model "$NEW_MODEL"; then
+  FAMILY="$(model_family "$NEW_MODEL")"
+  for m in "${MODELS[@]}"; do
+    if is_dflash_model "$m" && [[ "$(model_family "$m")" == "$FAMILY" ]]; then
+      DFLASH_DRAFT="$m"
+      break
+    fi
+  done
+fi
 
 echo ""
 echo "Context size options:"
@@ -484,26 +518,74 @@ case "${KV_CHOICE:-3}" in
   *) NEW_KV="q4_0" ;;
 esac
 
-if is_mtp_model "$NEW_MODEL"; then
-  if [ -z "$MTP_DRAFT_N_MAX" ]; then
-    if is_moe_model "$NEW_MODEL"; then
-      MTP_DRAFT_N_MAX=5
-    else
-      MTP_DRAFT_N_MAX=3
+echo ""
+echo "GPU layers (-ngl) — how many layers to offload to GPU:"
+echo "   1) 99  — full GPU offload (default, max performance)"
+echo "   2) 75  — high GPU usage"
+echo "   3) 50  — balanced"
+echo "   4) 25  — low GPU usage (more CPU, less VRAM)"
+echo "   5) Custom — enter manually (0-99)"
+
+read -rp "Select -ngl [default: 99]: " NGL_CHOICE
+case "${NGL_CHOICE:-1}" in
+  1) NEW_NGL=99 ;;
+  2) NEW_NGL=75 ;;
+  3) NEW_NGL=50 ;;
+  4) NEW_NGL=25 ;;
+  5)
+    read -rp "Enter custom -ngl value [0-99]: " NEW_NGL
+    if ! [[ "$NEW_NGL" =~ ^[0-9]+$ ]] || (( NEW_NGL < 0 || NEW_NGL > 99 )); then
+      echo "Invalid -ngl value."
+      exit 1
     fi
+    ;;
+  *) NEW_NGL=99 ;;
+esac
+
+if is_mtp_model "$NEW_MODEL" || [ -n "$DFLASH_DRAFT" ]; then
+  if is_mtp_model "$NEW_MODEL"; then
+    if [ -z "$MTP_DRAFT_N_MAX" ]; then
+      if is_moe_model "$NEW_MODEL"; then
+        MTP_DRAFT_N_MAX=5
+      else
+        MTP_DRAFT_N_MAX=3
+      fi
+    fi
+    DEFAULT_SPEC=1
+  elif [ -n "$DFLASH_DRAFT" ]; then
+    DEFAULT_SPEC=6
   fi
-  DEFAULT_SPEC=1
   echo ""
   echo "Speculative decoding method:"
-  echo "   1) MTP draft     — use the model's MTP heads (default, n-max $MTP_DRAFT_N_MAX) [Vulkan OK]"
+  if is_mtp_model "$NEW_MODEL"; then
+    echo "   1) MTP draft     — use the model's MTP heads (default, n-max $MTP_DRAFT_N_MAX) [Vulkan OK]"
+  else
+    echo "   1) MTP draft     — (not available: model is not an MTP model)"
+  fi
   echo "   2) ngram-mod     — n-gram matching, self-speculative (tunable)"
-  echo "   3) ngram-map-k4v — n-gram keys + 4 m-gram values"
+  echo "   3) ngram-map-k4v — n-gram keys + 4 m-gram values (fast self-speculation)"
   echo "   4) ngram-map-k   — n-gram keys only"
   echo "   5) ngram-simple  — simple n-gram lookup"
-  echo "   6) none (standard) — disable speculative decoding"
+  if [ -n "$DFLASH_DRAFT" ]; then
+    echo "   6) DFlash2       — distilled flash draft: $(basename "$DFLASH_DRAFT")"
+  fi
+  echo "   7) none          — disable speculative decoding"
+
   read -rp "Select method [default: $DEFAULT_SPEC]: " SPEC_CHOICE
   case "${SPEC_CHOICE:-$DEFAULT_SPEC}" in
     1)
+      if ! is_mtp_model "$NEW_MODEL"; then
+        echo "ERROR: MTP draft requires an MTP model."
+        exit 1
+      fi
+      read -rp "  MTP draft tokens (n-max) [default: $MTP_DRAFT_N_MAX]: " MTP_N_CHOICE
+      if [[ -n "$MTP_N_CHOICE" ]]; then
+        if ! [[ "$MTP_N_CHOICE" =~ ^[0-9]+$ ]] || (( MTP_N_CHOICE < 1 || MTP_N_CHOICE > 16 )); then
+          echo "Invalid n-max value (must be 1-16)."
+          exit 1
+        fi
+        MTP_DRAFT_N_MAX="$MTP_N_CHOICE"
+      fi
       NEW_METHOD="draft-mtp"
       SPEC_FLAGS="--spec-type draft-mtp --spec-draft-n-max $MTP_DRAFT_N_MAX"
       ;;
@@ -532,7 +614,15 @@ if is_mtp_model "$NEW_MODEL"; then
       NEW_METHOD="ngram-simple"
       SPEC_FLAGS="--spec-type ngram-simple"
       ;;
-    6|*)
+    6)
+      if [ -z "$DFLASH_DRAFT" ]; then
+        echo "ERROR: No DFlash draft model found for $NEW_MODEL"
+        exit 1
+      fi
+      NEW_METHOD="dflash"
+      SPEC_FLAGS="--spec-type draft-dflash --model-draft $DFLASH_DRAFT --spec-draft-n-max $DFLASH_DRAFT_N_MAX"
+      ;;
+    7|*)
       NEW_METHOD="none"
       SPEC_FLAGS=""
       ;;
@@ -545,6 +635,7 @@ fi
 echo ""
 echo "  New model   : $NEW_MODEL"
 echo "  ctx-size    : $NEW_CTX"
+echo "  -ngl        : $NEW_NGL"
 echo "  KV cache    : $NEW_KV (K and V)"
 if [ -n "$SPEC_FLAGS" ]; then
   echo "  Spec decode : $NEW_METHOD  $SPEC_FLAGS"
@@ -558,7 +649,7 @@ if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
   exit 0
 fi
 
-rewrite_execstart "$NEW_MODEL" "$NEW_CTX" "$NEW_KV" "$SPEC_FLAGS"
+rewrite_execstart "$NEW_MODEL" "$NEW_CTX" "$NEW_KV" "$SPEC_FLAGS" "$NEW_NGL"
 
 systemctl daemon-reload
 systemctl restart "$SERVICE"
@@ -585,8 +676,12 @@ done
 if [ "$OK" = "1" ]; then
   echo "  [✓] Switched to : $NEW_MODEL"
   echo "  [✓] ctx-size    : $NEW_CTX"
+  echo "  [✓] -ngl        : $NEW_NGL"
   echo "  [✓] KV cache    : $NEW_KV (K and V)"
   echo "  [✓] Spec decode : $NEW_METHOD"
+  if [ -n "$DFLASH_DRAFT" ] && [[ "$NEW_METHOD" == "dflash" ]]; then
+    echo "  [✓] Draft model : $DFLASH_DRAFT"
+  fi
   echo "  [✓] Service     : $SERVICE running (health OK)"
   echo ""
   echo "  Web UI ready at       : http://$(hostname -I | awk '{print $1}'):80"
@@ -597,6 +692,32 @@ else
   echo "  Check logs with: journalctl -u $SERVICE -f"
   exit 1
 fi
+
+echo ""
+echo "══════════════════════════════════════════════════════════════════"
+echo " FINAL COMMAND (exact ExecStart as written to systemd)"
+echo "══════════════════════════════════════════════════════════════════"
+systemctl cat "$SERVICE" 2>/dev/null | sed -n '/ExecStart/,/^Restart/p' | head -n 20
+echo ""
+echo " Breakdown of each flag:"
+echo "  /opt/llama.cpp/build/bin/llama-server  — server binary"
+echo "  --model $NEW_MODEL                     — model file (GGUF)"
+echo "  --host 0.0.0.0 --port 80               — listen address"
+echo "  --ctx-size $NEW_CTX                    — context window (tokens)"
+echo "  -ngl $NEW_NGL                          — GPU layers offloaded (99=full GPU, 0=CPU only)"
+echo "  --batch-size 512                       — batch size (prompt processing, K80 tuned)"
+echo "  --cache-type-k $NEW_KV / --cache-type-v $NEW_KV — KV cache quantization (VRAM vs quality)"
+if [ -n "$SPEC_FLAGS" ]; then
+  echo "  $SPEC_FLAGS — speculative decoding ($NEW_METHOD)"
+else
+  echo "  (no --spec-type)                     — standard decoding"
+fi
+echo "  --parallel 1                           — parallel slots (concurrent requests)"
+echo "══════════════════════════════════════════════════════════════════"
+echo " Full reconstructed command:"
+echo "  /opt/llama.cpp/build/bin/llama-server --model $NEW_MODEL --host 0.0.0.0 --port 80 --ctx-size $NEW_CTX -ngl $NEW_NGL --batch-size 512 --cache-type-k $NEW_KV --cache-type-v $NEW_KV ${SPEC_FLAGS:+$SPEC_FLAGS }--parallel 1"
+echo "══════════════════════════════════════════════════════════════════"
+
 EOS
 chmod +x "$SWITCH_SCRIPT"
 # Shared copy for MI60 reuse (single source)
