@@ -7,11 +7,11 @@ BOOTSTRAP_SCRIPT="${SCRIPT_DIR}/ansible/files/configure-ai-engine-inside-lxc.sh"
 usage() {
 	cat <<'EOF'
 Usage:
-	./deploy-hlh-ai-engine-egpu-k80.sh [--skip-host-driver]
+	./deploy-hlh-ai-engine-k80.sh [--skip-host-driver]
 
 K80 eGPU path (Tesla K80 GK210GL dual-GPU via OCuLink):
 	1) Verify/install NVIDIA 470 + CUDA 11.8 on Proxmox host (pinned)
-	2) Create privileged LXC 131 (hlh-ai-engine-egpu-k80) at 192.168.1.31
+	2) Create privileged LXC 131 (hlh-ai-engine-k80) at 192.168.1.31
 	3) Add cgroup + /dev/nvidia* bind-mounts for both GK210 chips (c7 + c8)
 	4) Start container + push/run CUDA bootstrap (GGML_CUDA=ON, cc 3.7)
 
@@ -31,8 +31,8 @@ CUDA_MAJOR="11.8"
 DRIVER_BRANCH="470"
 
 LXC_ID=131
-LXC_NAME="hlh-ai-engine-egpu-k80"
-LXC_HOSTNAME="hlh-ai-engine-egpu-k80"
+LXC_NAME="hlh-ai-engine-k80"
+LXC_HOSTNAME="hlh-ai-engine-k80"
 LXC_IMAGE="local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
 POOL="RaidZ1-6TB"
 MODEL_HOST_DIR="/srv/ai/models"
@@ -58,7 +58,7 @@ command -v pct >/dev/null 2>&1 || { echo "ERROR: pct not found. Run on Proxmox h
 
 confirm_existing_lxc_delete() {
 	local answer
-	printf '%s\n' 'Are you sure?  hlh-ai-engine-egpu-k80 is already running!'
+	printf '%s\n' 'Are you sure?  hlh-ai-engine-k80 is already running!'
 	printf '%s' 'Delete it and redeploy? [y/N] '
 	read -r answer
 	case "$answer" in y|Y|yes|YES) return 0 ;; *) echo "Aborted." >&2; exit 1 ;; esac

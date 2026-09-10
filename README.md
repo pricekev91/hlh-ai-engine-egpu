@@ -1,4 +1,4 @@
-# hlh-ai-engine-egpu-k80
+# hlh-ai-engine-k80
 
 Infrastructure-as-Code for the HLH shared AI inference engine (CUDA K80 eGPU variant).
 Deploys a GPU-accelerated llama.cpp runtime as a Proxmox LXC container using the
@@ -6,12 +6,12 @@ CUDA backend (470 + 11.8) on an OCuLink Tesla K80.
 
 ## Executive Summary
 
-This repository deploys and configures the **engine-egpu-k80** LXC on the HLH Proxmox
+This repository deploys and configures the **engine-k80** LXC on the HLH Proxmox
 host `prox01` (192.168.1.10). It is a sibling of `hlh-ai-engine` (ROCm 890M) and
 `hlh-ai-engine-egpu-vulkan` (Vulkan RX480) running the same shared AI inference workload
 on discrete NVIDIA hardware.
 
-- LXC 131, hostname `hlh-ai-engine-egpu-k80`, IP `192.168.1.31` (gw 192.168.1.1)
+- LXC 131, hostname `hlh-ai-engine-k80`, IP `192.168.1.31` (gw 192.168.1.1)
 - CUDA backend via NVIDIA 470.256.02 + CUDA 11.8 on Tesla K80 dual GK210GL (2×12GB = 24GB board, cc 3.7 Kepler) via OCuLink on Minisforum DG2
 - Dual GK210 chips at `c7:00.0` + `c8:00.0` (10de:102d) behind OCuLink switch `c5:00.0` (IOMMU 23/24), exposed as `nvidia0` + `nvidia1`
 - llama.cpp `GGML_CUDA=ON` `ARCH=37` `FA=OFF` (Kepler, no flash attention), native web UI on port 80
@@ -38,16 +38,16 @@ on discrete NVIDIA hardware.
 Deploy the K80 CUDA AI engine LXC on the Proxmox host (nukes 131, stops 130, reinstalls driver if needed):
 
 ```bash
-./deploy-hlh-ai-engine-egpu-k80.sh
+./deploy-hlh-ai-engine-k80.sh
 # --skip-host-driver to skip host 470/CUDA check (use after first reboot)
-./deploy-hlh-ai-engine-egpu-k80.sh --skip-host-driver
+./deploy-hlh-ai-engine-k80.sh --skip-host-driver
 ```
 
 Reconfigure an existing LXC via Ansible (no recreate):
 
 ```bash
-./configure-hlh-ai-engine-egpu-k80.sh
-./configure-hlh-ai-engine-egpu-k80.sh --host 192.168.1.31
+./configure-hlh-ai-engine-k80.sh
+./configure-hlh-ai-engine-k80.sh --host 192.168.1.31
 ```
 
 Switch loaded models (inside LXC after deployment):
@@ -58,27 +58,27 @@ k80-switch-model.sh
 nvidia-smi -L; nvidia-smi
 ```
 
-> Note: `hlh-ai-engine` (101), `hlh-ai-engine-egpu-vulkan` (130), and `hlh-ai-engine-egpu-k80` (131) share `/srv/ai/models`. You can run them concurrently only if they use different GPUs, but model file locking is not enforced. 130 and 131 share the single OCuLink slot — stop the other first: `pct stop 130 && pct start 131`.
+> Note: `hlh-ai-engine` (101), `hlh-ai-engine-egpu-vulkan` (130), and `hlh-ai-engine-k80` (131) share `/srv/ai/models`. You can run them concurrently only if they use different GPUs, but model file locking is not enforced. 130 and 131 share the single OCuLink slot — stop the other first: `pct stop 130 && pct start 131`.
 
 ## Deployment Model
 
 Deployment and configuration are separate phases:
 
-1. **Provisioning**: `deploy-hlh-ai-engine-egpu-k80.sh` creates the privileged LXC, wires CUDA passthrough (`/dev/nvidia*` — dynamic UVM major), and pushes the in-container bootstrap script. If host `nvidia` 470 not loaded, it blacklists `nouveau`, adds bullseye non-free + CUDA debian13 repo, installs `nvidia-tesla-470-driver=470.256.02-1~deb11u2` (DKMS), and reboots.
-2. **Configuration**: `ansible/playbooks/hlh-ai-engine-egpu-k80.yml` (hosts `hlh_ai_engine_egpu_k80`) runs `ansible/files/configure-ai-engine-inside-lxc.sh` via `pct exec` or SSH.
+1. **Provisioning**: `deploy-hlh-ai-engine-k80.sh` creates the privileged LXC, wires CUDA passthrough (`/dev/nvidia*` — dynamic UVM major), and pushes the in-container bootstrap script. If host `nvidia` 470 not loaded, it blacklists `nouveau`, adds bullseye non-free + CUDA debian13 repo, installs `nvidia-tesla-470-driver=470.256.02-1~deb11u2` (DKMS), and reboots.
+2. **Configuration**: `ansible/playbooks/hlh-ai-engine-k80.yml` (hosts `hlh_ai_engine_k80`) runs `ansible/files/configure-ai-engine-inside-lxc.sh` via `pct exec` or SSH.
 
 ## OpenTofu Module
 
 For programmatic LXC creation via OpenTofu (bind mount, not storage volume):
 
 ```hcl
-module "hlh_ai_engine_egpu_k80" {
+module "hlh_ai_engine_k80" {
   source = "./opentofu"
   pm_api_url          = var.pm_api_url
   pm_api_token_id     = var.pm_api_token_id
   pm_api_token_secret = var.pm_api_token_secret
   target_node         = "prox01"
-  hostname            = "hlh-ai-engine-egpu-k80"
+  hostname            = "hlh-ai-engine-k80"
   vmid                = 131
   ip_cidr             = "192.168.1.31/24"
   memory              = 8192
@@ -107,12 +107,12 @@ module "hlh_ai_engine_egpu_k80" {
 ## Repository Layout
 
 ```
-hlh-ai-engine-egpu-k80/
-├── deploy-hlh-ai-engine-egpu-k80.sh    # LXC creation + CUDA passthrough + bootstrap
-├── configure-hlh-ai-engine-egpu-k80.sh # Ansible-based reconfiguration
+hlh-ai-engine-k80/
+├── deploy-hlh-ai-engine-k80.sh    # LXC creation + CUDA passthrough + bootstrap
+├── configure-hlh-ai-engine-k80.sh # Ansible-based reconfiguration
 ├── ansible/
-│   ├── inventories/hlh-ai-engine-egpu-k80.yml  # 192.168.1.31
-│   ├── playbooks/hlh-ai-engine-egpu-k80.yml    # hosts: hlh_ai_engine_egpu_k80
+│   ├── inventories/hlh-ai-engine-k80.yml  # 192.168.1.31
+│   ├── playbooks/hlh-ai-engine-k80.yml    # hosts: hlh_ai_engine_k80
 │   └── files/
 │       ├── configure-ai-engine-inside-lxc.sh   # v1.0.0-k80 CUDA 11.8 + 470
 │       └── k80-switch-model.sh                 # v1.7.0-k80 standalone copy

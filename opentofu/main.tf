@@ -14,7 +14,7 @@ provider "proxmox" {
   pm_tls_insecure     = true
 }
 
-resource "proxmox_lxc" "hlh_ai_engine_egpu_k80" {
+resource "proxmox_lxc" "hlh_ai_engine_k80" {
   target_node  = var.target_node
   hostname     = var.hostname
   ostemplate   = var.ostemplate
@@ -70,16 +70,16 @@ resource "proxmox_lxc" "hlh_ai_engine_egpu_k80" {
 
   # NOTE: NVIDIA cgroup (c 195:* rwm, c 511:* rwm) and bind-mounts
   # (/dev/nvidia0, /dev/nvidia1, /dev/nvidiactl, /dev/nvidia-uvm*) are
-  # appended by deploy-hlh-ai-engine-egpu-k80.sh. Manual equivalent:
+  # appended by deploy-hlh-ai-engine-k80.sh. Manual equivalent:
   #   pct set <VMID> --lxc.conf 'lxc.cgroup2.devices.allow: c 195:* rwm'
   #   pct set <VMID> --lxc.conf 'lxc.cgroup2.devices.allow: c 511:* rwm'
   #   pct set <VMID> --lxc.conf 'lxc.mount.entry: /dev/nvidia0 dev/nvidia0 none bind,optional,create=file'
 }
 
 output "lxc_vmid" {
-  value = proxmox_lxc.hlh_ai_engine_egpu_k80.vmid
+  value = proxmox_lxc.hlh_ai_engine_k80.vmid
 }
 
 output "lxc_hostname" {
-  value = proxmox_lxc.hlh_ai_engine_egpu_k80.hostname
+  value = proxmox_lxc.hlh_ai_engine_k80.hostname
 }
