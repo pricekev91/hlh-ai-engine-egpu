@@ -287,9 +287,10 @@ ExecStart=${LLAMA_CPP_DIR}/build/bin/llama-server \\
   --ctx-size 32768 \\
   -ngl 99 \\
   --batch-size 512 \\
-  --parallel 1 \\
+  --flash-attn on \\
   --cache-type-k q4_0 \\
-  --cache-type-v q4_0
+  --cache-type-v q4_0 \\
+  --parallel 1
 Restart=on-failure
 RestartSec=10
 User=root
@@ -307,7 +308,8 @@ echo "[5/7] Creating model switcher: $SWITCH_SCRIPT (Tesla K80 dual GK210 Vulkan
 cat > "$SWITCH_SCRIPT" << 'EOS'
 #!/usr/bin/env bash
 # k80-switch-model.sh
-# Version: 2.1.0-k80-vulkan
+# Version: 2.1.1-k80-vulkan
+#   2.1.1-k80-vulkan - Add --flash-attn on (was in hlh 1.6.2, missing in k80 2.1.0) for ctx efficiency + speed
 #   2.1.0-k80-vulkan - Merge hlh 1.6.3 into k80 2.0.0: add hlh features (selectable -ngl 99/75/50/25/custom,
 #                     MTP n-max prompt 1-16, final command breakdown, draft/ngl state) but keep K80 Vulkan
 #                     dual GK210 24GB, batch 512, nvidia-smi/nvtop/vulkaninfo, no ROCm/DFlash optional
@@ -366,6 +368,7 @@ rewrite_execstart() {
       print "  --ctx-size " ctx " \\"
       print "  -ngl " ngl " \\"
       print "  --batch-size 512 \\"
+      print "  --flash-attn on \\"
       print "  --cache-type-k " kv " \\"
       if (spec_flags != "") {
         print "  --cache-type-v " kv " \\"
@@ -422,6 +425,7 @@ CUR_SPEC=$( grep -- '--spec-type '     "$SYSTEMD_SERVICE" | awk '{for(i=1;i<=NF;
 CUR_SPEC="${CUR_SPEC:-none}"
 CUR_DRAFT=$(grep -- '--model-draft '  "$SYSTEMD_SERVICE" | awk '{for(i=1;i<=NF;i++) if ($i=="--model-draft")  print $(i+1)}') || CUR_DRAFT=""
 CUR_NGL=$(grep -oP '(?<=-ngl )\S+' "$SYSTEMD_SERVICE" 2>/dev/null | head -n1 || grep -- '-ngl ' "$SYSTEMD_SERVICE" | awk '{for(i=1;i<=NF;i++) if ($i=="-ngl") print $(i+1)}' ) || CUR_NGL="(not set)"
+CUR_FLASH=$(grep -o -- '--flash-attn[^\\]*' "$SYSTEMD_SERVICE" 2>/dev/null | head -n1 || echo "not set")
 K80_COUNT=$(nvidia-smi -L 2>&1 | grep -c "GPU [0-9]:" || echo "?")
 
 echo "  Model directory : $MODEL_DIR"
@@ -431,6 +435,7 @@ echo "  KV cache (K/V)  : ${CUR_KV_K} / ${CUR_KV_V}"
 echo "  Spec decode     : $CUR_SPEC"
 echo "  Draft model     : ${CUR_DRAFT:-none}"
 echo "  -ngl (GPU layers): ${CUR_NGL:-(not set)}"
+echo "  Flash Attention : $CUR_FLASH"
 echo "  Vulkan devices  : $(vulkaninfo --summary 2>&1 | grep -c "GPU" || echo "?") (nvidia-smi shows $K80_COUNT K80 GPUs)"
 echo "  nvidia-smi      :"
 nvidia-smi -L 2>&1 | sed 's/^/    /' || echo "    nvidia-smi failed"
@@ -637,6 +642,7 @@ echo "  New model   : $NEW_MODEL"
 echo "  ctx-size    : $NEW_CTX"
 echo "  -ngl        : $NEW_NGL"
 echo "  KV cache    : $NEW_KV (K and V)"
+echo "  Flash Attention : on ( --flash-attn on )"
 if [ -n "$SPEC_FLAGS" ]; then
   echo "  Spec decode : $NEW_METHOD  $SPEC_FLAGS"
 else
@@ -678,6 +684,7 @@ if [ "$OK" = "1" ]; then
   echo "  [✓] ctx-size    : $NEW_CTX"
   echo "  [✓] -ngl        : $NEW_NGL"
   echo "  [✓] KV cache    : $NEW_KV (K and V)"
+  echo "  [✓] Flash Attn  : on"
   echo "  [✓] Spec decode : $NEW_METHOD"
   if [ -n "$DFLASH_DRAFT" ] && [[ "$NEW_METHOD" == "dflash" ]]; then
     echo "  [✓] Draft model : $DFLASH_DRAFT"
@@ -706,6 +713,7 @@ echo "  --host 0.0.0.0 --port 80               — listen address"
 echo "  --ctx-size $NEW_CTX                    — context window (tokens)"
 echo "  -ngl $NEW_NGL                          — GPU layers offloaded (99=full GPU, 0=CPU only)"
 echo "  --batch-size 512                       — batch size (prompt processing, K80 tuned)"
+echo "  --flash-attn on                        — Flash Attention optimized kernel (ctx efficiency + speed)"
 echo "  --cache-type-k $NEW_KV / --cache-type-v $NEW_KV — KV cache quantization (VRAM vs quality)"
 if [ -n "$SPEC_FLAGS" ]; then
   echo "  $SPEC_FLAGS — speculative decoding ($NEW_METHOD)"
@@ -715,7 +723,7 @@ fi
 echo "  --parallel 1                           — parallel slots (concurrent requests)"
 echo "══════════════════════════════════════════════════════════════════"
 echo " Full reconstructed command:"
-echo "  /opt/llama.cpp/build/bin/llama-server --model $NEW_MODEL --host 0.0.0.0 --port 80 --ctx-size $NEW_CTX -ngl $NEW_NGL --batch-size 512 --cache-type-k $NEW_KV --cache-type-v $NEW_KV ${SPEC_FLAGS:+$SPEC_FLAGS }--parallel 1"
+echo "  /opt/llama.cpp/build/bin/llama-server --model $NEW_MODEL --host 0.0.0.0 --port 80 --ctx-size $NEW_CTX -ngl $NEW_NGL --batch-size 512 --flash-attn on --cache-type-k $NEW_KV --cache-type-v $NEW_KV ${SPEC_FLAGS:+$SPEC_FLAGS }--parallel 1"
 echo "══════════════════════════════════════════════════════════════════"
 
 EOS
