@@ -14,7 +14,7 @@ provider "proxmox" {
   pm_tls_insecure     = true
 }
 
-resource "proxmox_lxc" "hlh_ai_engine_k80" {
+resource "proxmox_lxc" "hlh_ai_engine_v100" {
   target_node  = var.target_node
   hostname     = var.hostname
   ostemplate   = var.ostemplate
@@ -47,11 +47,9 @@ resource "proxmox_lxc" "hlh_ai_engine_k80" {
     size    = "${var.rootfs_size_gb}G"
   }
 
-  # K80 Tesla GK210 dual-GPU via OCuLink (c7:00.0 + c8:00.0)
-  # Both chips share the OCuLink switch at var.egpu_pci_address (0000:c5:00.0)
-  # but are in separate IOMMU groups (23/24). LXC passthrough is via /dev/nvidia*
-  # (cgroup + bind-mount), not hostpci. hostpci is not used for LXC; see deploy
-  # script for c 195:* / 511:* (UVM, dynamic major) allows and /dev/nvidia* mounts.
+  # V100 Tesla GV100GL 32GB single via OCuLink c5:00.0 via GPP 00:03.1
+  # Single IOMMU group 20. LXC passthrough is via /dev/nvidia0 (cgroup + bind-mount), not hostpci.
+  # hostpci is not used for LXC; see deploy script for c 195:* / 511:* (UVM, dynamic major) allows and /dev/nvidia* mounts.
   # We keep no hostpci device block here — the deploy script appends the
   # NVIDIA cgroup/mount entries post-create. This keeps the base resource
   # card-agnostic and pinned versions in variables.tf.
@@ -59,7 +57,7 @@ resource "proxmox_lxc" "hlh_ai_engine_k80" {
   # Deploy handles both via `grep nvidia-uvm /proc/devices`. /dev/nvidia-modeset is 195:254.
 
   # Model storage — bind-mount of host RaidZ1-6TB ZFS dataset /srv/ai/models
-  # Host and every LXC see the same path: /srv/ai/models (shared, 775, zfs xattr,noacl).
+  # Host and every LXC see the same path: /srv/ai/models (shared, 755, zfs xattr,noacl).
   # deploy.sh uses: --mp0 "/srv/ai/models,mp=/srv/ai/models" (pct bind mount).
   # For OpenTofu (telmate/proxmox) we map the same via bind mount:
   # `volume = "/srv/ai/models"` + `mp = "/srv/ai/models"`.
@@ -69,17 +67,17 @@ resource "proxmox_lxc" "hlh_ai_engine_k80" {
   }
 
   # NOTE: NVIDIA cgroup (c 195:* rwm, c 511:* rwm) and bind-mounts
-  # (/dev/nvidia0, /dev/nvidia1, /dev/nvidiactl, /dev/nvidia-uvm*) are
-  # appended by deploy-hlh-ai-engine-k80.sh. Manual equivalent:
+  # (/dev/nvidia0, /dev/nvidiactl, /dev/nvidia-uvm*) are
+  # appended by deploy-hlh-ai-engine-v100.sh. Manual equivalent:
   #   pct set <VMID> --lxc.conf 'lxc.cgroup2.devices.allow: c 195:* rwm'
   #   pct set <VMID> --lxc.conf 'lxc.cgroup2.devices.allow: c 511:* rwm'
   #   pct set <VMID> --lxc.conf 'lxc.mount.entry: /dev/nvidia0 dev/nvidia0 none bind,optional,create=file'
 }
 
 output "lxc_vmid" {
-  value = proxmox_lxc.hlh_ai_engine_k80.vmid
+  value = proxmox_lxc.hlh_ai_engine_v100.vmid
 }
 
 output "lxc_hostname" {
-  value = proxmox_lxc.hlh_ai_engine_k80.hostname
+  value = proxmox_lxc.hlh_ai_engine_v100.hostname
 }

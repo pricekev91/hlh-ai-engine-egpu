@@ -5,6 +5,15 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0-v100] - 2026-09-23
+
+### Changed
+
+- **Refactor K80 -> V100**: Renamed repo `hlh-ai-engine-k80` -> `hlh-ai-engine-v100` (LXC 131 same ID 192.168.1.31, hostname `hlh-ai-engine-v100`). V100 is single `GV100GL PG500-216 32GB cc 7.0 Volta` at `0000:c5:00.0` via GPP `00:03.1` OCuLink (was K80 dual GK210 `10de:102d` c7/c8 2x12GB cc 3.7). IOMMU 20 single GPU.
+- **CUDA backend**: `GGML_CUDA=ON` `ARCH=70` `FA=ON` (Volta supports FA) vs K80 `ARCH=37 FA=OFF`. Driver `550.163.01-2` (trixie) + CUDA `12.4.1` from `ubuntu2404` repo (R580 580.65.06 is last for Volta, CUDA 12.8/12.9 final; trixie stable currently 550 - override via `NVIDIA_DRIVER_VERSION` env).
+- **Passthrough**: single `/dev/nvidia0` + `nvidiactl` + `nvidia-uvm` (was dual `nvidia0`+`nvidia1`). `chmod 755` for `/srv/ai/models` (was `775`, root-managed homelab).
+- **Scripts**: `deploy-hlh-ai-engine-v100.sh` (was k80), `configure-hlh-ai-engine-v100.sh`, `ansible` `hlh_ai_engine_v100` hosts, `opentofu` `hlh_ai_engine_v100` resource, `v100-switch-model.sh` (was k80) single-GPU 32GB budget, `configure-ai-engine-inside-lxc.sh` v1.0.0-v100-cuda.
+
 ## [1.1.0-k80] - 2026-09-09
 
 ### Fixed

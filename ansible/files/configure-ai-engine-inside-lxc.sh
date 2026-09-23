@@ -1,34 +1,42 @@
 #!/usr/bin/env bash
 # configure-ai-engine-inside-lxc.sh
-# Version: 2.0.0-k80-vulkan
-# Description: Bootstrap llama.cpp AI engine on Ubuntu 24.04 LXC with VULKAN for Tesla K80 (GK210 dual cc 3.7) via OCuLink
-# Target GPU: NVIDIA Tesla K80 2x GK210GL (12GB per chip, 24GB board) via OCuLink on Minisforum DG2 / Proxmox 9.x privileged LXC
-# Backend: GGML_VULKAN=ON, GGML_CUDA=OFF (MTP requires Vulkan on Kepler cc 3.7; CUBLAS_STATUS_ARCH_MISMATCH with CUDA)
-# Monitoring: nvidia-utils-470 + libnvidia-compute-470 470.256.02 retained for nvidia-smi/nvtop (no CUDA toolkit)
-# Requirements: Run as root inside privileged LXC with /dev/nvidia* passthrough and /srv/ai/models bind mount
-# Changelog:
-#   2.0.0-k80-vulkan - Vulkan-only: GGML_VULKAN=ON, drop CUDA 11.8 toolkit/gcc-11, keep 470 userspace for nvtop
-#   1.0.0-k80 - Fork for hlh-ai-engine-egpu-k80 LXC 131: K80 dual-GK210, CUDA 11.8 + 470.256.02 pinned, GGML_CUDA=ON cc 3.7
+# Version: 1.0.0-v100-cuda
+# Description: Bootstrap llama.cpp AI engine on Ubuntu 24.04 LXC with CUDA for Tesla V100 (GV100 32GB cc 7.0) via OCuLink
+# Target GPU: NVIDIA Tesla V100 GV100GL PG500-216 (32GB HBM2) single via OCuLink c5:00.0 on Proxmox 9.x privileged LXC
+# Backend: GGML_CUDA=ON arch 70, FA ON, CUDA 12.4 + driver 550.163.01 (last stable for Volta in Debian trixie; R580 last overall)
+# Requirements: Run as root inside privileged LXC with /dev/nvidia0 passthrough and /srv/ai/models bind mount
 
 set -euo pipefail
 
-# --- PINNED VERSIONS (K80) ---
-NVIDIA_DRIVER_VERSION="470.256.02"
+# --- PINNED VERSIONS (V100 Volta cc 7.0) ---
+# Host driver: 470.256.02 for kernel 7.0 (only buildable), 550.163.01 for kernel 6.5. R580 last for Volta.
+# LXC CUDA must match host driver: 470->11.8, 550->12.4, 580->12.8. Auto-detect via host nvidia-smi or uname.
+KERNEL_MAJ=$(uname -r | cut -d. -f1)
+if [[ "$KERNEL_MAJ" -ge 7 ]]; then
+  NVIDIA_DRIVER_VERSION="470.256.02"
+  CUDA_VERSION="11.8.0-1"
+  CUDA_MAJOR="11.8"
+  CUDA_REPO="ubuntu2204"
+else
+  NVIDIA_DRIVER_VERSION="550.163.01"
+  CUDA_VERSION="12.4.1"
+  CUDA_MAJOR="12.4"
+  CUDA_REPO="ubuntu2404"
+fi
+# R580 (580.65.06) is last driver supporting Volta - upgrade both when Debian packages 580.
 
 # --- CONFIGURABLE ---
 MODEL_DIR="/srv/ai/models"
-DEFAULT_MODEL_URL=""
 DEFAULT_MODEL_FILE="Mellum2-12B-A2.5B-Thinking-Q3_K_M.gguf"
 LLAMA_CPP_REPO="https://github.com/ggerganov/llama.cpp.git"
 LLAMA_CPP_DIR="/opt/llama.cpp"
 SERVICE_NAME="ai-engine"
 SYSTEMD_SERVICE="/etc/systemd/system/${SERVICE_NAME}.service"
-SWITCH_SCRIPT="/usr/local/bin/k80-switch-model.sh"
-SHARED_SWITCH_SCRIPT="${MODEL_DIR}/k80-switch-model.sh"
+SWITCH_SCRIPT="/usr/local/bin/v100-switch-model.sh"
+SHARED_SWITCH_SCRIPT="${MODEL_DIR}/v100-switch-model.sh"
 
-# --- 1. BASE DEPENDENCIES + VULKAN + 470 USERSPACE (for nvidia-smi/nvtop) ---
-echo "[1/7] Installing base dependencies + Vulkan + 470 userspace (monitoring)..."
-# Locale + noninteractive to silence perl warnings (seen every apt run)
+# --- 1. BASE DEPENDENCIES + CUDA TOOLKIT ---
+echo "[1/7] Installing base dependencies + CUDA $CUDA_MAJOR + driver ${NVIDIA_DRIVER_VERSION} userspace..."
 export DEBIAN_FRONTEND=noninteractive
 export LANG=C LC_ALL=C
 if ! locale -a 2>&1 | grep -qi "en_US.utf8"; then
@@ -42,101 +50,88 @@ apt-get install -y --no-install-recommends \
   build-essential git cmake pkg-config \
   python3 python3-pip curl wget unzip bc \
   libopenblas-dev libssl-dev ca-certificates gnupg \
-  openssh-server \
-  libvulkan1 vulkan-tools glslc glslang-tools spirv-tools spirv-headers \
-  libvulkan-dev glslang-dev
+  openssh-server
 
-# Clean up stale CUDA repos/pins from previous 1.x deploys (vulkan-only now)
-rm -f /etc/apt/sources.list.d/cuda-ubuntu2204.list /etc/apt/sources.list.d/cuda-debian13.list 2>/dev/null || true
-rm -f /etc/apt/sources.list.d/jammy-libtinfo5.list 2>/dev/null || true
-rm -f /etc/apt/preferences.d/jammy-libtinfo5-pin /etc/apt/preferences.d/jammy-libtinfo5-allow 2>/dev/null || true
+# Add NVIDIA CUDA repo matching host driver branch
+if [[ "$CUDA_REPO" == "ubuntu2204" ]]; then
+  if [ ! -f /etc/apt/sources.list.d/cuda-ubuntu2204.list ]; then
+    echo "  Adding CUDA ubuntu2204 repo for toolkit $CUDA_MAJOR (470 branch)..."
+    curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/3bf863cc.pub | gpg --dearmor -o /usr/share/keyrings/cuda-ubuntu2204.gpg 2>/dev/null || true
+    echo "deb [signed-by=/usr/share/keyrings/cuda-ubuntu2204.gpg] https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64 /" > /etc/apt/sources.list.d/cuda-ubuntu2204.list
+    apt-get update 2>&1 | tail -n 10 || true
+  fi
+  # jammy libtinfo5 needed for 11.8 on noble
+  if ! grep -q "jammy" /etc/apt/sources.list.d/* 2>/dev/null; then
+    echo "deb http://archive.ubuntu.com/ubuntu jammy main universe" > /etc/apt/sources.list.d/jammy-libtinfo5.list
+    cat > /etc/apt/preferences.d/jammy-libtinfo5-pin <<'PIN'
+Package: libtinfo5 libncurses5
+Pin: release n=jammy
+Pin-Priority: 100
+PIN
+    apt-get update 2>&1 | tail -n 10 || true
+  fi
+else
+  if [ ! -f /etc/apt/sources.list.d/cuda-ubuntu2404.list ]; then
+    echo "  Adding CUDA ubuntu2404 repo for toolkit $CUDA_MAJOR..."
+    curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/3bf863cc.pub | gpg --dearmor -o /usr/share/keyrings/cuda-ubuntu2404.gpg 2>/dev/null || true
+    echo "deb [signed-by=/usr/share/keyrings/cuda-ubuntu2404.gpg] https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64 /" > /etc/apt/sources.list.d/cuda-ubuntu2404.list
+    apt-get update 2>&1 | tail -n 10 || true
+  fi
+fi
 
-# Ensure nvidia userspace is 470 (last for Kepler cc 3.7) for nvidia-smi/nvtop
-# Host provides /dev/nvidia* (470 kernel); LXC needs matching userspace 470 for monitoring
-# CUDA toolkit is NOT installed in vulkan-only mode.
+# Clean stale vulkan-only pins
+rm -f /etc/apt/preferences.d/jammy-libtinfo5-pin 2>/dev/null || true
+if [[ "$CUDA_REPO" == "ubuntu2404" ]]; then rm -f /etc/apt/sources.list.d/cuda-ubuntu2204.list 2>/dev/null || true; fi
+
+# Userspace driver must match host for nvidia-smi (V100 Volta)
 apt-get update
-apt-get install -y --allow-downgrades libnvidia-compute-470=470.256.02-0ubuntu0.24.04.1 2>&1 | tail -n 20 || {
-  echo "WARNING: libnvidia-compute-470 470.256.02 not found in noble repo, trying any 470" >&2
-  apt-get install -y --allow-downgrades libnvidia-compute-470 2>&1 | tail -n 20 || true
-}
-apt-get install -y --no-install-recommends nvidia-utils-470=470.256.02-0ubuntu0.24.04.1 2>&1 | tail -n 20 || apt-get install -y --no-install-recommends nvidia-utils-470 2>&1 | tail -n 20 || true
-# nvtop for live GPU monitoring (K80 dual)
+if [[ "$CUDA_MAJOR" == "11.8" ]]; then
+  echo "  Installing CUDA toolkit $CUDA_MAJOR + nvidia userspace $NVIDIA_DRIVER_VERSION (470 branch)..."
+  apt-get install -y --no-install-recommends libtinfo5 2>&1 | tail -n 10 || true
+  apt-get install -y --allow-downgrades cuda-toolkit-11-8 2>&1 | tail -n 30 || apt-get install -y cuda-toolkit 2>&1 | tail -n 20 || true
+  apt-get install -y --allow-downgrades libnvidia-compute-470=${NVIDIA_DRIVER_VERSION}-0ubuntu0.24.04.1 2>&1 | tail -n 20 || apt-get install -y --allow-downgrades libnvidia-compute-470 2>&1 | tail -n 20 || true
+  apt-get install -y --no-install-recommends nvidia-utils-470=${NVIDIA_DRIVER_VERSION}-0ubuntu0.24.04.1 2>&1 | tail -n 20 || apt-get install -y --no-install-recommends nvidia-utils-470 2>&1 | tail -n 20 || true
+  apt-mark hold libnvidia-compute-470 nvidia-utils-470 cuda-toolkit-11-8 2>&1 | head -n 5 || true
+  DRIVER_PKG="470"
+else
+  echo "  Installing CUDA toolkit $CUDA_MAJOR + nvidia userspace $NVIDIA_DRIVER_VERSION..."
+  apt-get install -y --allow-downgrades cuda-toolkit-12-4 2>&1 | tail -n 30 || apt-get install -y cuda-toolkit 2>&1 | tail -n 20 || true
+  apt-get install -y --allow-downgrades libnvidia-compute-550=${NVIDIA_DRIVER_VERSION}-0ubuntu1 2>&1 | tail -n 20 || apt-get install -y --allow-downgrades libnvidia-compute-550 2>&1 | tail -n 20 || true
+  apt-get install -y --no-install-recommends nvidia-utils-550=${NVIDIA_DRIVER_VERSION}-0ubuntu1 2>&1 | tail -n 20 || apt-get install -y --no-install-recommends nvidia-utils-550 2>&1 | tail -n 20 || true
+  apt-mark hold libnvidia-compute-550 nvidia-utils-550 cuda-toolkit-12-4 2>&1 | head -n 5 || true
+  DRIVER_PKG="550"
+fi
+# nvtop for live GPU monitoring
 apt-get install -y --no-install-recommends nvtop 2>&1 | tail -n 10 || echo "WARNING: nvtop not in repo, skipping" >&2
-# Host driver provides /dev/nvidia* but LXC needs userspace nvidia-smi + libnvidia-ml 470
-# The 470 deb on noble leaves a broken symlink /usr/bin/nvidia-smi -> /usr/lib/nvidia-470/bin/nvidia-smi (non-existent)
-# and libnvidia-ml.so.1 -> 535. Fix both by using host's binary pushed to /tmp/nvidia-smi
+
+# Host driver provides /dev/nvidia* but LXC needs userspace nvidia-smi + libnvidia-ml
 if [ -x /tmp/nvidia-smi ]; then
   rm -f /usr/bin/nvidia-smi
   cp /tmp/nvidia-smi /usr/bin/nvidia-smi
   chmod +x /usr/bin/nvidia-smi
 fi
-if [ -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.470.256.02 ]; then
-  ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1
-  ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so
-  ldconfig
+if [ -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.${NVIDIA_DRIVER_VERSION} ]; then
+  ln -sf libnvidia-ml.so.${NVIDIA_DRIVER_VERSION} /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 2>&1 | head -n 5 || true
+  ln -sf libnvidia-ml.so.${NVIDIA_DRIVER_VERSION} /usr/lib/x86_64-linux-gnu/libnvidia-ml.so 2>&1 | head -n 5 || true
+  ldconfig 2>&1 | head -n 5 || true
+elif [ -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.550.163.01 ]; then
+  ln -sf libnvidia-ml.so.550.163.01 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 2>&1 | head -n 5 || true
+  ldconfig 2>&1 | head -n 5 || true
+elif [ -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.470.256.02 ]; then
+  ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 2>&1 | head -n 5 || true
+  ldconfig 2>&1 | head -n 5 || true
 fi
-# Hold 470 and prevent accidental 535 upgrade (no cuda-* holds in vulkan mode)
-apt-mark hold libnvidia-compute-470 nvidia-utils-470 libnvidia-compute-535 nvidia-utils-535 2>&1 | head -n 5 || true
-apt-mark unhold cuda-toolkit-11-8 cuda-nvcc-11-8 cuda-cudart-11-8 2>/dev/null || true
-# Remove any stale CUDA toolkit left from 1.x (optional, keeps image lean)
-# apt-get autoremove -y cuda-toolkit-11-8 cuda-nvcc-11-8 2>&1 | tail -n 10 || true
 
-# Vulkan ICD: 470 on noble provides /usr/share/vulkan/icd.d/nvidia_icd.json via libnvidia-gl-470,
-# but libnvidia-gl-470 conflicts with held libnvidia-compute-470 (apt resolver) and pulls 580/535 alongside 470.
-# Temporarily unhold, install pinned ICD, purge 580/535 contamination, then re-hold.
-mkdir -p /usr/share/vulkan/icd.d /etc/vulkan/icd.d 2>/dev/null || true
-if [ ! -f /usr/share/vulkan/icd.d/nvidia_icd.json ] && [ ! -f /etc/vulkan/icd.d/nvidia_icd.json ]; then
-  echo "  Note: nvidia_icd.json not found, installing nvidia vulkan icd supplement..."
-  apt-mark unhold libnvidia-compute-470 nvidia-utils-470 libnvidia-compute-535 nvidia-utils-535 libnvidia-compute-580 nvidia-utils-580 2>/dev/null || true
-  apt-get install -y --allow-downgrades libnvidia-gl-470=470.256.02-0ubuntu0.24.04.1 2>&1 | tail -n 20 || \
-    apt-get install -y --allow-downgrades libnvidia-gl-470 2>&1 | tail -n 20 || \
-    echo "WARNING: libnvidia-gl-470 install failed (held packages conflict) - Vulkan ICD may be missing, vulkaninfo will fail" >&2
-  # Purge 580/535 that apt drags in alongside 470 (causes NVML 580.173 mismatch vs 470 kernel + Vulkan loader picking 580's libGLX)
-  echo "  Purging 580/535 contamination (keep 470 only)..."
-  apt-get purge -y libnvidia-compute-580 nvidia-utils-580 libnvidia-compute-535 nvidia-utils-535 2>&1 | tail -n 20 || true
-  apt-get autoremove -y 2>&1 | tail -n 10 || true
-  # Re-ensure 470 is correct after purge (symlinks may have flipped to 580)
-  apt-get install -y --allow-downgrades --no-install-recommends libnvidia-compute-470=470.256.02-0ubuntu0.24.04.1 nvidia-utils-470=470.256.02-0ubuntu0.24.04.1 2>&1 | tail -n 20 || true
-  if [ -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.470.256.02 ]; then
-    ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 2>&1 | head -n 5 || true
-    ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so 2>&1 | head -n 5 || true
-    ldconfig 2>&1 | head -n 5 || true
-  fi
-  apt-mark hold libnvidia-compute-470 nvidia-utils-470 libnvidia-compute-535 nvidia-utils-535 libnvidia-compute-580 nvidia-utils-580 2>&1 | head -n 5 || true
-  # Fallback: generate minimal ICD if package unavailable but driver libs exist
-  if [ ! -f /usr/share/vulkan/icd.d/nvidia_icd.json ] && [ -f /usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.470.256.02 ]; then
-    cat > /usr/share/vulkan/icd.d/nvidia_icd.json <<'ICD'
-{
-  "file_format_version" : "1.0.0",
-  "ICD": {
-    "library_path" : "libGLX_nvidia.so.0",
-    "api_version" : "1.2.142"
-  }
-}
-ICD
-    echo "  Generated fallback nvidia_icd.json" >&2
-  fi
-fi
-# Fix ICD library_path: generic libGLX_nvidia.so.0 may resolve to 580 after multi-version install; pin to 470
-if [ -f /usr/share/vulkan/icd.d/nvidia_icd.json ]; then
-  if grep -q '"library_path" : "libGLX_nvidia.so.0"' /usr/share/vulkan/icd.d/nvidia_icd.json 2>/dev/null; then
-    # Prefer explicit 470 path if exists
-    if [ -f /usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.470.256.02 ]; then
-      sed -i 's#"library_path" : "libGLX_nvidia.so.0"#"library_path" : "/usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.470.256.02"#' /usr/share/vulkan/icd.d/nvidia_icd.json || true
-      echo "  Patched ICD library_path to 470 explicit" >&2
-    fi
-  fi
-  cat /usr/share/vulkan/icd.d/nvidia_icd.json 2>&1 | head -n 20 || true
-fi
-echo "  Vulkan ICDs:"
-ls -l /usr/share/vulkan/icd.d/ 2>&1 | head -n 20 || true
-ls -l /etc/vulkan/icd.d/ 2>&1 | head -n 20 || true
-# Final NVML sanity: ensure 580 not present
-dpkg -l | grep -E "libnvidia-compute|nvidia-utils" 2>&1 | head -n 20 || true
-ls -l /usr/lib/x86_64-linux-gnu/libnvidia-ml.so* 2>&1 | head -n 20 || true
-ldconfig -p 2>&1 | grep -E "libnvidia-ml|libGLX_nvidia" | head -n 20 || true
+# Env for CUDA
+export PATH=/usr/local/cuda/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
+echo 'export PATH=/usr/local/cuda/bin:$PATH' > /etc/profile.d/cuda.sh
+echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH' >> /etc/profile.d/cuda.sh
+if [ -f /usr/local/cuda-12.4/targets/x86_64-linux/lib/libcudart.so.12 ]; then ln -sf /usr/local/cuda-12.4 /usr/local/cuda 2>/dev/null || true; fi
+if [ -f /usr/local/cuda-11.8/targets/x86_64-linux/lib/libcudart.so.11.0 ]; then ln -sf /usr/local/cuda-11.8 /usr/local/cuda 2>/dev/null || true; fi
+ldconfig
 
-# Groups for GPU (nvidia)
+# Groups for GPU
 usermod -aG render root || true
 usermod -aG video root || true
 
@@ -152,48 +147,36 @@ systemctl enable ssh 2>/dev/null || true
 systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
 
 # --- Pre-Build Checks ---
-echo "[1/7] Verifying Vulkan + K80 dual-GPU (nvidia-smi for monitoring)... [host driver must be healthy first]"
-# Locale already fixed at top; ensure exports persist
+echo "[1/7] Verifying CUDA + V100 single-GPU (nvidia-smi)..."
 export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 2>/dev/null || true
-# Fix nvidia-smi inside LXC (host driver 470.256.02, LXC apt may leave broken symlink to non-existent /usr/lib/nvidia-470/bin/nvidia-smi)
 if [ -L /usr/bin/nvidia-smi ] && [ ! -e /usr/bin/nvidia-smi ]; then rm -f /usr/bin/nvidia-smi; fi
 if [ ! -x /usr/bin/nvidia-smi ] && [ -x /tmp/nvidia-smi ]; then cp /tmp/nvidia-smi /usr/bin/nvidia-smi; chmod +x /usr/bin/nvidia-smi; fi
-if [ -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.470.256.02 ]; then
-  ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 2>&1 | head -n 5 || true
-  ln -sf libnvidia-ml.so.470.256.02 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so 2>&1 | head -n 5 || true
+if [ -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.${NVIDIA_DRIVER_VERSION} ]; then
+  ln -sf libnvidia-ml.so.${NVIDIA_DRIVER_VERSION} /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 2>&1 | head -n 5 || true
+  ln -sf libnvidia-ml.so.${NVIDIA_DRIVER_VERSION} /usr/lib/x86_64-linux-gnu/libnvidia-ml.so 2>&1 | head -n 5 || true
   ldconfig 2>&1 | head -n 5 || true
 fi
-# Use set +o pipefail for nvidia-smi | head to avoid SIGPIPE with pipefail
-# NOTE: nvidia-smi Unknown Error for 0000:C7/C8 means HOST driver mismatch (470 vs kernel 7.x) - not LXC fault.
-# See prox01: dkms status; modinfo nvidia | grep version; dmesg | grep -i NVRM; reboot or modprobe -r nvidia_uvm/nvidia && modprobe nvidia
 set +o pipefail
 nvidia-smi -L 2>&1 | head -20 || {
-  echo "WARNING: nvidia-smi failed (host driver not talking to K80 0000:C7/C8). Host fix needed:" >&2
+  echo "WARNING: nvidia-smi failed (host driver not talking to V100 0000:c5:00.0). Host fix needed:" >&2
   echo "  prox01: dkms status | grep nvidia; modinfo nvidia | head; dmesg | grep -i nvidia | tail -n 30" >&2
-  echo "  prox01: ls -l /dev/nvidia*; cat /proc/driver/nvidia/version 2>&1 | head" >&2
-  echo "  prox01: reboot OR modprobe -r nvidia_uvm nvidia_modeset nvidia_drm nvidia && modprobe nvidia && nvidia-modprobe -u -c 0" >&2
   ls -l /dev/nvidia* 2>&1 | head -20
-  ls -l /usr/bin/nvidia-smi* 2>&1 | head -n 20
-  echo "Continuing to Vulkan build (will fail vulkaninfo if host still broken)..." >&2
 }
 set -o pipefail
 echo "  nvidia-smi -L:"
 nvidia-smi -L 2>&1 | head -n 20 || true
-echo "  Checking both GK210 chips (expect 2 GPUs):"
+echo "  Checking single GV100 chip (expect 1 GPU):"
 GPU_COUNT=$(nvidia-smi -L 2>&1 | grep -c "GPU [0-9]:" || true)
-set +o pipefail
-if [ "$GPU_COUNT" -ne 2 ]; then echo "WARNING: Expected 2 K80 GPUs, found $GPU_COUNT (host driver Unknown Error is root cause)" >&2; fi
-echo "  Pinned: Vulkan + driver $NVIDIA_DRIVER_VERSION (470 EOL, CUDA monitoring only)"
-echo "  vulkaninfo --summary:"
-vulkaninfo --summary 2>&1 | head -n 60 || echo "vulkaninfo failed - check nvidia_icd.json and /dev/nvidia* (host driver must be healthy)"
-echo "  Vulkan devices via vulkaninfo:"
-vulkaninfo 2>&1 | grep -E "GPU|deviceName|driverID" | head -n 20 || true
+if [ "$GPU_COUNT" -ne 1 ]; then echo "WARNING: Expected 1 V100 GPU, found $GPU_COUNT" >&2; fi
+echo "  Pinned: CUDA $CUDA_MAJOR + driver $NVIDIA_DRIVER_VERSION (Volta cc 7.0, FA ON)"
+nvcc --version 2>&1 | head -n 20 || echo "nvcc not found - check cuda-toolkit install"
+echo "  CUDA devices:"
+nvidia-smi 2>&1 | head -n 30 || true
 
-# --- 2. BUILD LLAMA.CPP (VULKAN) ---
-echo "[2/7] Cloning and building llama.cpp (VULKAN)..."
-# Vulkan needs glslc (from glslang-tools/shaderc) - already installed above; verify
-command -v glslc >/dev/null 2>&1 || { echo "ERROR: glslc not found for Vulkan build" >&2; exit 1; }
-# No gcc-11 pin needed for Vulkan (noble gcc 13 is fine); ensure alternatives sane
+# --- 2. BUILD LLAMA.CPP (CUDA) ---
+echo "[2/7] Cloning and building llama.cpp (CUDA arch 70)..."
+# CUDA needs gcc compatible - noble gcc 13 ok for 12.4, but ensure
+command -v nvcc >/dev/null 2>&1 || { echo "ERROR: nvcc not found for CUDA build" >&2; exit 1; }
 if [ ! -d "$LLAMA_CPP_DIR" ]; then
   git clone --depth=1 "$LLAMA_CPP_REPO" "$LLAMA_CPP_DIR"
 else
@@ -202,14 +185,17 @@ fi
 
 cd "$LLAMA_CPP_DIR"
 
-# Vulkan-only: MTP works via Vulkan (no CUBLAS_STATUS_ARCH_MISMATCH on cc 3.7)
 cmake -S . -B build \
-  -DGGML_VULKAN=ON \
-  -DGGML_CUDA=OFF \
+  -DGGML_CUDA=ON \
+  -DGGML_CUDA_FA_ALL_QUANTS=ON \
+  -DGGML_VULKAN=OFF \
   -DGGML_HIP=OFF \
+  -DGGML_CUDA_FORCE_DMMV=ON \
+  -DGGML_CUDA_FORCE_MMQ=ON \
+  -DCMAKE_CUDA_ARCHITECTURES=70 \
   -DCMAKE_BUILD_TYPE=Release
 
-echo "[2/7] Building... (this can take 15-30 minutes with 12 cores, Vulkan)"
+echo "[2/7] Building... (15-30 min with 12 cores, CUDA 12.4 sm70)"
 TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
 AVAIL_MB=$(( TOTAL_MEM_KB / 1024 - 1024 ))
 if [ "$AVAIL_MB" -lt 1500 ]; then JOBS=1
@@ -218,16 +204,12 @@ elif [ "$AVAIL_MB" -lt 4500 ]; then JOBS=3
 else JOBS=$(nproc)
 fi
 [ "$JOBS" -gt 12 ] && JOBS=12
-echo "[2/7] Detected ${TOTAL_MEM_KB}kB RAM -> using -j${JOBS} (was -j$(nproc)) to avoid OOM"
+echo "[2/7] Detected ${TOTAL_MEM_KB}kB RAM -> using -j${JOBS}"
 cmake --build build --config Release -j${JOBS}
 
 # --- 3. MODEL STORAGE (bind mount — same path host and CT) ---
-# Host RaidZ1-6TB ZFS dataset /srv/ai/models is bind-mounted via --mp0 into LXC at /srv/ai/models.
-# Models are already present on host after mount — CT does not download. We pick the active
-# model from the shared directory.
 echo "[3/7] Setting up model directory (bind mount host == CT: $MODEL_DIR)..."
 mkdir -p "$MODEL_DIR"
-# Verify mount is active (should show ZFS or bind)
 mount | grep -E "on ${MODEL_DIR} " | head -3 || echo "  (no mount yet — may be bind from host)"
 ls -lh "$MODEL_DIR" | head -20 || true
 cd "$MODEL_DIR"
@@ -242,7 +224,6 @@ else
     "Mellum2-12B-A2.5B-Thinking-Q3_K_M.gguf"
     "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
     "Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf"
-    "Qwen_Qwen3-Coder-Next-Q4_K_M.gguf"
   )
   for MODEL_CANDIDATE in "${PREFERRED_MODELS[@]}"; do
     if [ -f "${MODEL_DIR}/${MODEL_CANDIDATE}" ]; then
@@ -265,22 +246,21 @@ else
   fi
 fi
 
-# Validate active model exists
 if [ ! -f "${MODEL_DIR}/${ACTIVE_MODEL_FILE}" ]; then
   echo "WARNING: Active model file not found: ${MODEL_DIR}/${ACTIVE_MODEL_FILE} — ai-engine will fail to start until host populates /srv/ai/models" >&2
 fi
 
 # --- 4. SYSTEMD SERVICE ---
-echo "[4/7] Creating systemd service for llama-server (Vulkan)..."
+echo "[4/7] Creating systemd service for llama-server (CUDA V100)..."
 cat > "$SYSTEMD_SERVICE" << UNIT
 [Unit]
-Description=llama.cpp AI Engine (llama-server) - Vulkan K80 on port 80 - driver $NVIDIA_DRIVER_VERSION (vulkan-only, MTP enabled)
+Description=llama.cpp AI Engine (llama-server) - CUDA V100 32GB on port 80 - driver $NVIDIA_DRIVER_VERSION sm70 FA ON
 After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=${LLAMA_CPP_DIR}/build/bin
-Environment=VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json
+Environment=CUDA_VISIBLE_DEVICES=0
 ExecStart=${LLAMA_CPP_DIR}/build/bin/llama-server \\
   --model ${MODEL_DIR}/${ACTIVE_MODEL_FILE} \\
   --host 0.0.0.0 --port 80 \\
@@ -299,64 +279,33 @@ User=root
 WantedBy=multi-user.target
 UNIT
 
-# --- 5. MODEL SWITCH SCRIPT (K80 dual GK210 - single source) ---
-# Single script: /usr/local/bin/k80-switch-model.sh + /srv/ai/models/k80-switch-model.sh
-# Refactored from hlh-ai-engine switch-model.sh v1.7.0, tuned for K80 Vulkan (MTP enabled)
-# Changes vs upstream: banner/K80 VRAM table (2x12GB=24GB), -ngl 99, --batch-size 512,
-# vulkan verify via vulkaninfo, nvidia-smi for monitoring only.
-echo "[5/7] Creating model switcher: $SWITCH_SCRIPT (Tesla K80 dual GK210 Vulkan) -> $SHARED_SWITCH_SCRIPT..."
+# --- 5. MODEL SWITCH SCRIPT (V100 GV100 single 32GB) ---
+echo "[5/7] Creating model switcher: $SWITCH_SCRIPT (Tesla V100 32GB CUDA) -> $SHARED_SWITCH_SCRIPT..."
 cat > "$SWITCH_SCRIPT" << 'EOS'
 #!/usr/bin/env bash
-# k80-switch-model.sh
-# Version: 2.1.1-k80-vulkan
-#   2.1.1-k80-vulkan - Add --flash-attn on (was in hlh 1.6.2, missing in k80 2.1.0) for ctx efficiency + speed
-#   2.1.0-k80-vulkan - Merge hlh 1.6.3 into k80 2.0.0: add hlh features (selectable -ngl 99/75/50/25/custom,
-#                     MTP n-max prompt 1-16, final command breakdown, draft/ngl state) but keep K80 Vulkan
-#                     dual GK210 24GB, batch 512, nvidia-smi/nvtop/vulkaninfo, no ROCm/DFlash optional
-# Description: Interactive model switcher for llama.cpp ai-engine service (Tesla K80 dual GK210 Vulkan egpu)
-# Supports: model selection, ctx-size, KV cache quantization, speculative decoding method (MTP draft / ngram / DFlash / none)
-# Changelog:
-#   2.1.0-k80-vulkan - Merge from hlh 1.6.3 + k80 2.0.0: selectable ngl, MTP n-max prompt, breakdown, keep Vulkan MTP
-#   2.0.0-k80-vulkan - Vulkan-only: banner 24GB, -ngl 99, --batch-size 512, verify via vulkaninfo + nvidia-smi monitoring
-#   1.6.3 - Added MTP draft n-max prompt (default 5 MoE / 3 dense); now prompts for token count after selecting MTP draft
-#   1.6.2 - Exposed -ngl as selectable variable (99/75/50/25/custom, default 99), added --flash-attn on, added final breakdown
-#   1.6.1 - Fixed readiness check: probe /health HTTP endpoint
+# v100-switch-model.sh
+# Version: 1.0.0-v100-cuda
+# Description: Interactive model switcher for llama.cpp ai-engine service (Tesla V100 GV100 32GB CUDA)
 set -euo pipefail
 
 MODEL_DIR="/srv/ai/models"
 SERVICE="ai-engine"
 SYSTEMD_SERVICE="/etc/systemd/system/${SERVICE}.service"
-# MTP draft n-max: 5 for MoE models (e.g. Qwen3.6-35B-A3B-MTP), 3 for dense
 MTP_DRAFT_N_MAX="${MTP_DRAFT_N_MAX:-}"
 NGRAM_N_MATCH="${NGRAM_N_MATCH:-24}"
 NGRAM_N_MIN="${NGRAM_N_MIN:-48}"
 NGRAM_N_MAX="${NGRAM_N_MAX:-64}"
-# DFlash draft n-max (kept from hlh, optional for k80 Vulkan if draft GGUF present)
 DFLASH_DRAFT_N_MAX="${DFLASH_DRAFT_N_MAX:-7}"
 
-is_mtp_model() {
-  [[ "$(basename "$1")" =~ [Mm][Tt][Pp] ]]
-}
-is_dflash_model() {
-  [[ "$(basename "$1")" =~ [Dd][Ff]lash ]]
-}
+is_mtp_model() { [[ "$(basename "$1")" =~ [Mm][Tt][Pp] ]]; }
+is_dflash_model() { [[ "$(basename "$1")" =~ [Dd][Ff]lash ]]; }
 model_family() {
-  local base
-  base="$(basename "$1")"
-  base="${base%.gguf}"
-  base="${base%%-[Qq][0-9]*}"
-  base="${base%%-[Ii][Qq]*}"
-  base="${base%%-[Uu][Dd]*}"
-  base="${base%%-[Dd][Ff]lash*}"
-  echo "$base"
+  local base; base="$(basename "$1")"; base="${base%.gguf}"; base="${base%%-[Qq][0-9]*}" ; base="${base%%-[Ii][Qq]*}" ; base="${base%%-[Uu][Dd]*}" ; base="${base%%-[Dd][Ff]lash*}" ; echo "$base"
 }
-is_moe_model() {
-  [[ "$(basename "$1")" =~ -A[0-9]+B- ]]
-}
+is_moe_model() { [[ "$(basename "$1")" =~ -A[0-9]+B- ]]; }
 rewrite_execstart() {
   local model="$1" ctx="$2" kv="$3" spec_flags="$4" ngl="$5"
-  local tmp_file
-  tmp_file="$(mktemp)"
+  local tmp_file; tmp_file="$(mktemp)"
   cp "$SYSTEMD_SERVICE" "${SYSTEMD_SERVICE}.backup.$(date +%s)"
   awk -v model="$model" -v ctx="$ctx" -v kv="$kv" -v spec_flags="$spec_flags" -v ngl="$ngl" '
     BEGIN { in_block=0; done=0 }
@@ -378,42 +327,31 @@ rewrite_execstart() {
         print "  --cache-type-v " kv " \\"
         print "  --parallel 1"
       }
-      in_block=1
-      next
+      in_block=1; next
     }
-    in_block {
-      if (/^Restart=/) { in_block=0; print }
-      next
-    }
+    in_block { if (/^Restart=/) { in_block=0; print } next }
     { print }
     END { if (!done) exit 42 }
-  ' "$SYSTEMD_SERVICE" > "$tmp_file" || {
-    rm -f "$tmp_file"
-    echo "ERROR: Failed to rewrite ExecStart in $SYSTEMD_SERVICE" >&2
-    echo "Service file may be corrupted or missing" >&2
-    exit 1
-  }
+  ' "$SYSTEMD_SERVICE" > "$tmp_file" || { rm -f "$tmp_file"; echo "ERROR: Failed to rewrite ExecStart" >&2; exit 1; }
   mv "$tmp_file" "$SYSTEMD_SERVICE"
   echo "INFO: Successfully updated service configuration"
 }
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════════╗"
-echo "║        k80-switch-model.sh (Tesla K80 dual GK210 VULKAN egpu)   ║"
+echo "║        v100-switch-model.sh (Tesla V100 GV100 32GB CUDA)        ║"
 echo "╠══════════════════════════════════════════════════════════════════╣"
-echo "║  BACKEND  VULKAN (MTP enabled)  CUDA only for nvidia-smi/nvtop  ║"
-echo "║  VRAM BUDGET  K80 dual 2×12GB = 24GB board (Vulkan devices 0,1)  ║"
-echo "║  Model Weights (fixed) + KV cache (scales with ctx) = total     ║"
-echo "║    70B Q2_K      ~17 GB   70B Q3_K_M   ~26 GB                    ║"
-echo "║    70B Q4_K_M    ~38 GB   70B Q6_K     ~54 GB                    ║"
-echo "║    35B Q4_K_M    ~21 GB   35B Q5_K_M   ~25 GB                    ║"
-echo "║    30B Q4_K_XL   ~16 GB   27B Q5_K_M   ~18 GB                    ║"
-echo "║                  KV q4_0    KV q6_0    KV q8_0  (per 24GB)       ║"
-echo "║    64K context   ~ 8 GB     ~12 GB     ~18 GB  -> fits 30B Q4    ║"
-echo "║    32K context   ~ 4 GB      ~ 6 GB     ~ 9 GB  -> fits 35B Q4   ║"
+echo "║  BACKEND  CUDA sm70 (FA ON)  32GB HBM2 single GPU 0000:c5:00.0  ║"
+echo "║  VRAM BUDGET  32GB single - much larger than K80 2x12GB        ║"
+echo "║  Model Weights + KV cache = total (KV scales with ctx)          ║"
+echo "║    70B Q4_K_M    ~39 GB   70B Q5_K_M   ~48 GB (needs spill)     ║"
+echo "║    35B Q4_K_M    ~21 GB   35B Q5_K_M   ~25 GB -> fits 32GB      ║"
+echo "║    30B Q4_K_M    ~18 GB   32B Q4       ~18-22GB                 ║"
+echo "║                  KV q4_0    KV q6_0    KV q8_0  (per 32GB)      ║"
+echo "║    64K context   ~ 8 GB     ~12 GB     ~18 GB  -> fits 30B Q4   ║"
+echo "║    32K context   ~ 4 GB      ~ 6 GB     ~ 9 GB  -> fits 35B Q4  ║"
 echo "║    16K context   ~ 2 GB      ~ 3 GB     ~ 5 GB                  ║"
-echo "║     8K context   ~ 1 GB      ~ 2 GB     ~ 3 GB                  ║"
-echo "║  K80 needs q4_0 for 32K+ on 30B+; 8K allows q8_0                ║"
+echo "║  V100 supports FA ON for speed + memory efficiency              ║"
 echo "╚══════════════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -426,7 +364,7 @@ CUR_SPEC="${CUR_SPEC:-none}"
 CUR_DRAFT=$(grep -- '--model-draft '  "$SYSTEMD_SERVICE" | awk '{for(i=1;i<=NF;i++) if ($i=="--model-draft")  print $(i+1)}') || CUR_DRAFT=""
 CUR_NGL=$(grep -oP '(?<=-ngl )\S+' "$SYSTEMD_SERVICE" 2>/dev/null | head -n1 || grep -- '-ngl ' "$SYSTEMD_SERVICE" | awk '{for(i=1;i<=NF;i++) if ($i=="-ngl") print $(i+1)}' ) || CUR_NGL="(not set)"
 CUR_FLASH=$(grep -o -- '--flash-attn[^\\]*' "$SYSTEMD_SERVICE" 2>/dev/null | head -n1 || echo "not set")
-K80_COUNT=$(nvidia-smi -L 2>&1 | grep -c "GPU [0-9]:" || echo "?")
+V100_COUNT=$(nvidia-smi -L 2>&1 | grep -c "GPU [0-9]:" || echo "?")
 
 echo "  Model directory : $MODEL_DIR"
 echo "  Currently active: $CUR_MODEL"
@@ -436,11 +374,8 @@ echo "  Spec decode     : $CUR_SPEC"
 echo "  Draft model     : ${CUR_DRAFT:-none}"
 echo "  -ngl (GPU layers): ${CUR_NGL:-(not set)}"
 echo "  Flash Attention : $CUR_FLASH"
-echo "  Vulkan devices  : $(vulkaninfo --summary 2>&1 | grep -c "GPU" || echo "?") (nvidia-smi shows $K80_COUNT K80 GPUs)"
 echo "  nvidia-smi      :"
 nvidia-smi -L 2>&1 | sed 's/^/    /' || echo "    nvidia-smi failed"
-echo "  vulkaninfo      :"
-vulkaninfo --summary 2>&1 | sed 's/^/    /' | head -n 20 || echo "    vulkaninfo failed"
 echo ""
 
 mapfile -t MODELS < <(find "$MODEL_DIR" -maxdepth 1 -type f -name '*.gguf' | sort)
@@ -467,7 +402,6 @@ if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || (( CHOICE < 1 || CHOICE > ${#MODELS[@]} )); 
 fi
 NEW_MODEL="${MODELS[$((CHOICE-1))]}"
 
-# DFlash draft pairing (from hlh, optional for k80 if draft present)
 DFLASH_DRAFT=""
 if ! is_dflash_model "$NEW_MODEL"; then
   FAMILY="$(model_family "$NEW_MODEL")"
@@ -481,12 +415,12 @@ fi
 
 echo ""
 echo "Context size options:"
-echo "   1) 98304  (96K)  — maximum long-context (needs 2GB KV q4_0, unlikely on K80 12GB)"
-echo "   2) 73728  (72K)  — extended long-context"
-echo "   3) 65536  (64K)  — full long-context"
-echo "   4) 32768  (32K)  — recommended for 30B Q4 on K80"
-echo "   5) 16384  (16K)  — quarter, minimal KV usage"
-echo "   6)  8192   (8K)  — minimal, maximum VRAM headroom"
+echo "   1) 98304  (96K)  — maximum (12GB KV q4_0)"
+echo "   2) 73728  (72K)  — extended"
+echo "   3) 65536  (64K)  — full (8GB KV q4_0)"
+echo "   4) 32768  (32K)  — recommended for 30-35B Q4 on V100 32GB"
+echo "   5) 16384  (16K)  — quarter"
+echo "   6)  8192   (8K)  — minimal"
 echo "   7) Custom         — enter manually"
 
 read -rp "Select context size [default: 32768]: " CTX_CHOICE
@@ -499,21 +433,17 @@ case "${CTX_CHOICE:-4}" in
   6) NEW_CTX=8192   ;;
   7)
     read -rp "Enter custom ctx-size: " NEW_CTX
-    if ! [[ "$NEW_CTX" =~ ^[0-9]+$ ]]; then
-      echo "Invalid ctx-size."
-      exit 1
-    fi
-    ;;
+    if ! [[ "$NEW_CTX" =~ ^[0-9]+$ ]]; then echo "Invalid ctx-size."; exit 1; fi ;;
   *) NEW_CTX=32768 ;;
 esac
 
 echo ""
-echo "KV cache quantization (applies to both K and V cache):"
-echo "   1) q8_0  — highest quality,  ~2x VRAM vs q4"
+echo "KV cache quantization:"
+echo "   1) q8_0  — highest quality, ~2x VRAM vs q4"
 echo "   2) q6_0  — very good quality, ~1.5x VRAM vs q4"
-echo "   3) q4_0  — recommended for K80, lowest VRAM"
+echo "   3) q4_0  — recommended for 32GB, lowest VRAM"
 echo ""
-echo "   Recommendation for K80 32K: q4_0 (saves 5GB vs q8_0)"
+echo "   Recommendation for V100 32GB 32K: q4_0 or q6_0"
 
 read -rp "Select KV cache quant [default: q4_0]: " KV_CHOICE
 case "${KV_CHOICE:-3}" in
@@ -524,11 +454,11 @@ case "${KV_CHOICE:-3}" in
 esac
 
 echo ""
-echo "GPU layers (-ngl) — how many layers to offload to GPU:"
-echo "   1) 99  — full GPU offload (default, max performance)"
-echo "   2) 75  — high GPU usage"
+echo "GPU layers (-ngl):"
+echo "   1) 99  — full GPU offload (default)"
+echo "   2) 75  — high"
 echo "   3) 50  — balanced"
-echo "   4) 25  — low GPU usage (more CPU, less VRAM)"
+echo "   4) 25  — low"
 echo "   5) Custom — enter manually (0-99)"
 
 read -rp "Select -ngl [default: 99]: " NGL_CHOICE
@@ -539,36 +469,26 @@ case "${NGL_CHOICE:-1}" in
   4) NEW_NGL=25 ;;
   5)
     read -rp "Enter custom -ngl value [0-99]: " NEW_NGL
-    if ! [[ "$NEW_NGL" =~ ^[0-9]+$ ]] || (( NEW_NGL < 0 || NEW_NGL > 99 )); then
-      echo "Invalid -ngl value."
-      exit 1
-    fi
-    ;;
+    if ! [[ "$NEW_NGL" =~ ^[0-9]+$ ]] || (( NEW_NGL < 0 || NEW_NGL > 99 )); then echo "Invalid -ngl value."; exit 1; fi ;;
   *) NEW_NGL=99 ;;
 esac
 
 if is_mtp_model "$NEW_MODEL" || [ -n "$DFLASH_DRAFT" ]; then
   if is_mtp_model "$NEW_MODEL"; then
     if [ -z "$MTP_DRAFT_N_MAX" ]; then
-      if is_moe_model "$NEW_MODEL"; then
-        MTP_DRAFT_N_MAX=5
-      else
-        MTP_DRAFT_N_MAX=3
-      fi
+      if is_moe_model "$NEW_MODEL"; then MTP_DRAFT_N_MAX=5; else MTP_DRAFT_N_MAX=3; fi
     fi
     DEFAULT_SPEC=1
-  elif [ -n "$DFLASH_DRAFT" ]; then
-    DEFAULT_SPEC=6
-  fi
+  elif [ -n "$DFLASH_DRAFT" ]; then DEFAULT_SPEC=6; fi
   echo ""
   echo "Speculative decoding method:"
   if is_mtp_model "$NEW_MODEL"; then
-    echo "   1) MTP draft     — use the model's MTP heads (default, n-max $MTP_DRAFT_N_MAX) [Vulkan OK]"
+    echo "   1) MTP draft     — use the model's MTP heads (default, n-max $MTP_DRAFT_N_MAX) [CUDA sm70 limited - test]"
   else
     echo "   1) MTP draft     — (not available: model is not an MTP model)"
   fi
-  echo "   2) ngram-mod     — n-gram matching, self-speculative (tunable)"
-  echo "   3) ngram-map-k4v — n-gram keys + 4 m-gram values (fast self-speculation)"
+  echo "   2) ngram-mod     — n-gram matching"
+  echo "   3) ngram-map-k4v — n-gram keys + 4 m-gram values"
   echo "   4) ngram-map-k   — n-gram keys only"
   echo "   5) ngram-simple  — simple n-gram lookup"
   if [ -n "$DFLASH_DRAFT" ]; then
@@ -579,62 +499,32 @@ if is_mtp_model "$NEW_MODEL" || [ -n "$DFLASH_DRAFT" ]; then
   read -rp "Select method [default: $DEFAULT_SPEC]: " SPEC_CHOICE
   case "${SPEC_CHOICE:-$DEFAULT_SPEC}" in
     1)
-      if ! is_mtp_model "$NEW_MODEL"; then
-        echo "ERROR: MTP draft requires an MTP model."
-        exit 1
-      fi
+      if ! is_mtp_model "$NEW_MODEL"; then echo "ERROR: MTP draft requires an MTP model."; exit 1; fi
       read -rp "  MTP draft tokens (n-max) [default: $MTP_DRAFT_N_MAX]: " MTP_N_CHOICE
       if [[ -n "$MTP_N_CHOICE" ]]; then
-        if ! [[ "$MTP_N_CHOICE" =~ ^[0-9]+$ ]] || (( MTP_N_CHOICE < 1 || MTP_N_CHOICE > 16 )); then
-          echo "Invalid n-max value (must be 1-16)."
-          exit 1
-        fi
+        if ! [[ "$MTP_N_CHOICE" =~ ^[0-9]+$ ]] || (( MTP_N_CHOICE < 1 || MTP_N_CHOICE > 16 )); then echo "Invalid n-max value (must be 1-16)."; exit 1; fi
         MTP_DRAFT_N_MAX="$MTP_N_CHOICE"
       fi
-      NEW_METHOD="draft-mtp"
-      SPEC_FLAGS="--spec-type draft-mtp --spec-draft-n-max $MTP_DRAFT_N_MAX"
-      ;;
+      NEW_METHOD="draft-mtp"; SPEC_FLAGS="--spec-type draft-mtp --spec-draft-n-max $MTP_DRAFT_N_MAX" ;;
     2)
       NEW_METHOD="ngram-mod"
       read -rp "  Customize ngram-mod params? [y/N]: " NGRAM_CUSTOM
       if [[ "$NGRAM_CUSTOM" =~ ^[Yy]$ ]]; then
-        read -rp "    n-match (lookup length, default $NGRAM_N_MATCH): " TMP_N
-        [[ "$TMP_N" =~ ^[0-9]+$ ]] && NGRAM_N_MATCH="$TMP_N"
-        read -rp "    n-min (draft min tokens, default $NGRAM_N_MIN): " TMP_N
-        [[ "$TMP_N" =~ ^[0-9]+$ ]] && NGRAM_N_MIN="$TMP_N"
-        read -rp "    n-max (draft max tokens, default $NGRAM_N_MAX): " TMP_N
-        [[ "$TMP_N" =~ ^[0-9]+$ ]] && NGRAM_N_MAX="$TMP_N"
+        read -rp "    n-match (default $NGRAM_N_MATCH): " TMP_N; [[ "$TMP_N" =~ ^[0-9]+$ ]] && NGRAM_N_MATCH="$TMP_N"
+        read -rp "    n-min (default $NGRAM_N_MIN): " TMP_N; [[ "$TMP_N" =~ ^[0-9]+$ ]] && NGRAM_N_MIN="$TMP_N"
+        read -rp "    n-max (default $NGRAM_N_MAX): " TMP_N; [[ "$TMP_N" =~ ^[0-9]+$ ]] && NGRAM_N_MAX="$TMP_N"
       fi
-      SPEC_FLAGS="--spec-type ngram-mod --spec-ngram-mod-n-match $NGRAM_N_MATCH --spec-ngram-mod-n-min $NGRAM_N_MIN --spec-ngram-mod-n-max $NGRAM_N_MAX"
-      ;;
-    3)
-      NEW_METHOD="ngram-map-k4v"
-      SPEC_FLAGS="--spec-type ngram-map-k4v"
-      ;;
-    4)
-      NEW_METHOD="ngram-map-k"
-      SPEC_FLAGS="--spec-type ngram-map-k"
-      ;;
-    5)
-      NEW_METHOD="ngram-simple"
-      SPEC_FLAGS="--spec-type ngram-simple"
-      ;;
+      SPEC_FLAGS="--spec-type ngram-mod --spec-ngram-mod-n-match $NGRAM_N_MATCH --spec-ngram-mod-n-min $NGRAM_N_MIN --spec-ngram-mod-n-max $NGRAM_N_MAX" ;;
+    3) NEW_METHOD="ngram-map-k4v"; SPEC_FLAGS="--spec-type ngram-map-k4v" ;;
+    4) NEW_METHOD="ngram-map-k"; SPEC_FLAGS="--spec-type ngram-map-k" ;;
+    5) NEW_METHOD="ngram-simple"; SPEC_FLAGS="--spec-type ngram-simple" ;;
     6)
-      if [ -z "$DFLASH_DRAFT" ]; then
-        echo "ERROR: No DFlash draft model found for $NEW_MODEL"
-        exit 1
-      fi
-      NEW_METHOD="dflash"
-      SPEC_FLAGS="--spec-type draft-dflash --model-draft $DFLASH_DRAFT --spec-draft-n-max $DFLASH_DRAFT_N_MAX"
-      ;;
-    7|*)
-      NEW_METHOD="none"
-      SPEC_FLAGS=""
-      ;;
+      if [ -z "$DFLASH_DRAFT" ]; then echo "ERROR: No DFlash draft model found for $NEW_MODEL"; exit 1; fi
+      NEW_METHOD="dflash"; SPEC_FLAGS="--spec-type draft-dflash --model-draft $DFLASH_DRAFT --spec-draft-n-max $DFLASH_DRAFT_N_MAX" ;;
+    7|*) NEW_METHOD="none"; SPEC_FLAGS="" ;;
   esac
 else
-  NEW_METHOD="none"
-  SPEC_FLAGS=""
+  NEW_METHOD="none"; SPEC_FLAGS=""
 fi
 
 echo ""
@@ -643,17 +533,10 @@ echo "  ctx-size    : $NEW_CTX"
 echo "  -ngl        : $NEW_NGL"
 echo "  KV cache    : $NEW_KV (K and V)"
 echo "  Flash Attention : on ( --flash-attn on )"
-if [ -n "$SPEC_FLAGS" ]; then
-  echo "  Spec decode : $NEW_METHOD  $SPEC_FLAGS"
-else
-  echo "  Spec decode : $NEW_METHOD"
-fi
+if [ -n "$SPEC_FLAGS" ]; then echo "  Spec decode : $NEW_METHOD  $SPEC_FLAGS"; else echo "  Spec decode : $NEW_METHOD"; fi
 echo ""
 read -rp "Apply and restart $SERVICE? [y/N]: " CONFIRM
-if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-  echo "Aborted."
-  exit 0
-fi
+if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then echo "Aborted."; exit 0; fi
 
 rewrite_execstart "$NEW_MODEL" "$NEW_CTX" "$NEW_KV" "$SPEC_FLAGS" "$NEW_NGL"
 
@@ -666,16 +549,10 @@ OK=0
 echo ""
 echo "  Waiting for $SERVICE to load ($HEALTH_URL)..."
 for i in {1..90}; do
-  if curl -fsS -m 3 -o /dev/null "$HEALTH_URL" 2>/dev/null; then
-    OK=1
-    break
-  fi
+  if curl -fsS -m 3 -o /dev/null "$HEALTH_URL" 2>/dev/null; then OK=1; break; fi
   NR="$(systemctl show -p NRestarts --value "$SERVICE" 2>/dev/null || echo 0)"
   ST="$(systemctl show -p ActiveState --value "$SERVICE" 2>/dev/null)"
-  if [ "$ST" = "failed" ] || { [ -n "$NR" ] && [ "$NR" -gt "$START_RESTARTS" ]; }; then
-    echo "  [✗] $SERVICE entered failed/crash-loop state (NRestarts=$NR)."
-    break
-  fi
+  if [ "$ST" = "failed" ] || { [ -n "$NR" ] && [ "$NR" -gt "$START_RESTARTS" ]; }; then echo "  [✗] $SERVICE entered failed/crash-loop state (NRestarts=$NR)."; break; fi
   sleep 2
 done
 
@@ -686,13 +563,11 @@ if [ "$OK" = "1" ]; then
   echo "  [✓] KV cache    : $NEW_KV (K and V)"
   echo "  [✓] Flash Attn  : on"
   echo "  [✓] Spec decode : $NEW_METHOD"
-  if [ -n "$DFLASH_DRAFT" ] && [[ "$NEW_METHOD" == "dflash" ]]; then
-    echo "  [✓] Draft model : $DFLASH_DRAFT"
-  fi
+  if [ -n "$DFLASH_DRAFT" ] && [[ "$NEW_METHOD" == "dflash" ]]; then echo "  [✓] Draft model : $DFLASH_DRAFT"; fi
   echo "  [✓] Service     : $SERVICE running (health OK)"
   echo ""
   echo "  Web UI ready at       : http://$(hostname -I | awk '{print $1}'):80"
-  echo "  Verify GPU usage with  : nvidia-smi; nvtop; vulkaninfo --summary"
+  echo "  Verify GPU usage with  : nvidia-smi; nvtop"
   echo "  Watch logs with       : journalctl -u $SERVICE -f"
 else
   echo "  [✗] WARNING: $SERVICE did not start cleanly after switch!"
@@ -712,15 +587,11 @@ echo "  --model $NEW_MODEL                     — model file (GGUF)"
 echo "  --host 0.0.0.0 --port 80               — listen address"
 echo "  --ctx-size $NEW_CTX                    — context window (tokens)"
 echo "  -ngl $NEW_NGL                          — GPU layers offloaded (99=full GPU, 0=CPU only)"
-echo "  --batch-size 512                       — batch size (prompt processing, K80 tuned)"
+echo "  --batch-size 512                       — batch size (prompt processing, V100 tuned)"
 echo "  --flash-attn on                        — Flash Attention optimized kernel (ctx efficiency + speed)"
-echo "  --cache-type-k $NEW_KV / --cache-type-v $NEW_KV — KV cache quantization (VRAM vs quality)"
-if [ -n "$SPEC_FLAGS" ]; then
-  echo "  $SPEC_FLAGS — speculative decoding ($NEW_METHOD)"
-else
-  echo "  (no --spec-type)                     — standard decoding"
-fi
-echo "  --parallel 1                           — parallel slots (concurrent requests)"
+echo "  --cache-type-k $NEW_KV / --cache-type-v $NEW_KV — KV cache quantization"
+if [ -n "$SPEC_FLAGS" ]; then echo "  $SPEC_FLAGS — speculative decoding ($NEW_METHOD)"; else echo "  (no --spec-type)                     — standard decoding"; fi
+echo "  --parallel 1                           — parallel slots"
 echo "══════════════════════════════════════════════════════════════════"
 echo " Full reconstructed command:"
 echo "  /opt/llama.cpp/build/bin/llama-server --model $NEW_MODEL --host 0.0.0.0 --port 80 --ctx-size $NEW_CTX -ngl $NEW_NGL --batch-size 512 --flash-attn on --cache-type-k $NEW_KV --cache-type-v $NEW_KV ${SPEC_FLAGS:+$SPEC_FLAGS }--parallel 1"
@@ -728,12 +599,10 @@ echo "════════════════════════�
 
 EOS
 chmod +x "$SWITCH_SCRIPT"
-# Shared copy for MI60 reuse (single source)
 cp "$SWITCH_SCRIPT" "$SHARED_SWITCH_SCRIPT"
 chmod +x "$SHARED_SWITCH_SCRIPT"
-# Cleanup stale names — only k80-switch-model.sh should exist per request
-rm -f /usr/local/bin/cuda-switch-model.sh /usr/local/bin/egpu-switch-model.sh /usr/local/bin/switch-model.sh 2>/dev/null || true
-rm -f "${MODEL_DIR}/cuda-switch-model.sh" "${MODEL_DIR}/egpu-switch-model.sh" "${MODEL_DIR}/switch-model.sh" 2>/dev/null || true
+rm -f /usr/local/bin/k80-switch-model.sh /usr/local/bin/cuda-switch-model.sh 2>/dev/null || true
+rm -f "${MODEL_DIR}/k80-switch-model.sh" "${MODEL_DIR}/cuda-switch-model.sh" 2>/dev/null || true
 
 # --- 6. ENABLE & START ---
 echo "[6/7] Enabling $SERVICE_NAME..."
@@ -743,13 +612,12 @@ systemctl enable --now "$SERVICE_NAME"
 # --- 7. VERIFICATION ---
 echo "[7/7] Verifying..."
 nvidia-smi 2>&1 | head -20 || true
-vulkaninfo --summary 2>&1 | head -n 40 || true
 nvtop --version 2>&1 | head -n 5 || echo "nvtop: $(which nvtop || echo not found)"
 ${LLAMA_CPP_DIR}/build/bin/llama-server --version 2>&1 | head -5 || true
 systemctl status "$SERVICE_NAME" --no-pager | head -30
 echo ""
-echo "[Bootstrap complete - k80 Vulkan + 470.256.02 monitoring, dual-GK210 MTP enabled]"
+echo "[Bootstrap complete - V100 CUDA $CUDA_MAJOR + $NVIDIA_DRIVER_VERSION sm70 FA ON, 32GB single-GPU]"
 echo "  Web UI: http://<container-ip>:80 (LXC 131 -> 192.168.1.31:80)"
-echo "  Switch: k80-switch-model.sh (also /srv/ai/models/k80-switch-model.sh)"
-echo "  Backend: Vulkan (MTP) + driver $NVIDIA_DRIVER_VERSION for nvidia-smi/nvtop"
-echo "  Verify: vulkaninfo --summary; nvidia-smi -L; nvtop"
+echo "  Switch: v100-switch-model.sh (also /srv/ai/models/v100-switch-model.sh)"
+echo "  Backend: CUDA sm70 (V100 32GB)"
+echo "  Verify: nvidia-smi -L; nvtop; nvidia-smi dmon"

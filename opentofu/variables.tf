@@ -23,7 +23,7 @@ variable "target_node" {
 variable "hostname" {
   description = "LXC hostname"
   type        = string
-  default     = "hlh-ai-engine-k80"
+  default     = "hlh-ai-engine-v100"
 }
 
 variable "vmid" {
@@ -100,27 +100,27 @@ variable "lxc_root_password" {
 }
 
 variable "egpu_pci_address" {
-  description = "PCI address of the eGPU on the OCuLink connector (e.g. 0000:c5:00.0). For K80 this is the OCuLink switch (0000:c5:00.0); both GK210 chips (c7/c8) share it. Detected automatically."
+  description = "PCI address of the eGPU on the OCuLink connector. For V100 this is single GV100 at 0000:c5:00.0 (10de:1df0) via GPP 00:03.1."
   type        = string
   default     = "0000:c5:00.0"
 }
 
 variable "nvidia_driver_version" {
-  description = "Pinned NVIDIA driver version for Tesla K80 (Kepler cc 3.7, EOL). 470.256.02 is last supporting cc 3.7; CUDA 12 drops Kepler."
+  description = "Pinned NVIDIA driver version for Tesla V100 (Volta cc 7.0). 550.163.01 is stable in Debian trixie; R580 (580.65.06) is last branch supporting Volta (CUDA 12.8/12.9 last fully)."
   type        = string
-  default     = "470.256.02-1~deb11u2"
+  default     = "550.163.01-2"
 }
 
 variable "cuda_version" {
-  description = "Pinned CUDA toolkit version for K80 (11.8 is last with cc 3.7 support)."
+  description = "Pinned CUDA toolkit version for V100 (12.4 with 550 driver; 12.8 last with 570/580)."
   type        = string
-  default     = "11.8.0-1"
+  default     = "12.4.1"
 }
 
 variable "description" {
   description = "LXC description"
   type        = string
-  default     = "llama.cpp AI engine with CUDA 11.8 + driver 470.256.02 for Tesla K80 (GK210 dual cc 3.7) via OCuLink, model storage on RaidZ1-6TB — pinned CUDA 11.8"
+  default     = "llama.cpp AI engine with CUDA 12.4 + driver 550.163.01 for Tesla V100 (GV100 32GB cc 7.0) via OCuLink c5:00.0, model storage on RaidZ1-6TB — sm70 FA ON"
 }
 
 variable "model_mount_path" {

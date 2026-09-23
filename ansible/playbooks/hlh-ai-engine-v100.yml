@@ -1,6 +1,6 @@
 ---
-- name: Configure HLH AI engine (CUDA K80 Tesla GK210 dual)
-  hosts: hlh_ai_engine_k80
+- name: Configure HLH AI engine (CUDA V100 Volta GV100 32GB)
+  hosts: hlh_ai_engine_v100
   become: true
   vars:
     hlh_offline: false
