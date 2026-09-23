@@ -62,10 +62,10 @@ nvidia-smi -L; nvidia-smi
 
 ## Deployment Model
 
-Two bash scripts (no ansible/opentofu - easiest for AI):
+Two bash scripts only (no ansible/opentofu):
 
-1. **Provisioning**: `deploy-hlh-ai-engine-v100.sh` creates the privileged LXC, wires CUDA passthrough (`/dev/nvidia*` — single GV100), and pushes the in-container bootstrap script. If host `nvidia` driver not loaded, it blacklists `nouveau`, ensures trixie non-free + CUDA debian13 repo, installs `nvidia-driver` (kernel-aware: 470 on 7.0.14, 550 on 6.5) via DKMS, and reboots. Last driver for Volta is R580 (580.65.06) with CUDA 12.8/12.9 - trixie stable currently has 550; set `NVIDIA_DRIVER_VERSION=580.65.06-0ubuntu1 DRIVER_BRANCH=580` to use 580 when packaged.
-2. **Configuration**: `configure-hlh-ai-engine-v100.sh` re-runs `configure-ai-engine-inside-lxc.sh` inside the LXC via `pct exec` (if on prox01) or `ssh` (fallback) - same bash, no ansible. `configure-ai-engine-inside-lxc.sh` is the single bootstrap that installs CUDA toolkit, builds llama.cpp `sm70 FA ON`, and creates `v100-switch-model.sh`.
+1. **Provisioning**: `deploy-hlh-ai-engine-v100.sh` creates the privileged LXC, wires CUDA passthrough (`/dev/nvidia*` — single GV100), and pushes the configuration script. If host `nvidia` driver not loaded, it blacklists `nouveau`, ensures trixie non-free + CUDA debian13 repo, installs `nvidia-driver` (kernel-aware: 470 on 7.0.14, 550 on 6.5) via DKMS, and reboots. Last driver for Volta is R580 (580.65.06) with CUDA 12.8/12.9 - trixie stable currently has 550; set `NVIDIA_DRIVER_VERSION=580.65.06-0ubuntu1 DRIVER_BRANCH=580` to use 580 when packaged.
+2. **Configuration**: `configure-hlh-ai-engine-v100.sh` - when run on host it pushes itself into the LXC via `pct exec`/`ssh` and re-runs with `--bootstrap-inside`; that flag runs the embedded bootstrap (CUDA toolkit + llama.cpp `sm70 FA ON` + `v100-switch-model.sh` generation). No separate inside file.
 
 ## Runtime Contract
 
@@ -87,10 +87,8 @@ Two bash scripts (no ansible/opentofu - easiest for AI):
 
 ```
 hlh-ai-engine-v100/
-├── deploy-hlh-ai-engine-v100.sh       # Provision: LXC creation + CUDA passthrough + bootstrap (bash)
-├── configure-hlh-ai-engine-v100.sh    # Configuration: re-run bootstrap via pct exec/ssh (bash, no ansible)
-├── configure-ai-engine-inside-lxc.sh  # Bootstrap inside LXC: CUDA toolkit + llama.cpp sm70 FA ON (single file)
-├── v100-switch-model.sh               # Standalone model switcher (also generated inside LXC)
+├── deploy-hlh-ai-engine-v100.sh    # Provision: LXC creation + CUDA passthrough + bootstrap (bash)
+├── configure-hlh-ai-engine-v100.sh # Configuration: host wrapper + embedded bootstrap --bootstrap-inside (bash only)
 ├── 00_BACKLOG.md
 ├── 10_ACTIVE.md
 ├── 90_DONE.md

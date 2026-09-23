@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BOOTSTRAP_SCRIPT="${SCRIPT_DIR}/configure-ai-engine-inside-lxc.sh"
+BOOTSTRAP_SCRIPT="${SCRIPT_DIR}/configure-hlh-ai-engine-v100.sh"
 
 usage() {
 	cat <<'EOF'
@@ -248,9 +248,9 @@ sleep 5
 
 echo "[5/6] Running in-container CUDA bootstrap (CUDA $CUDA_MAJOR, driver $DRIVER_BRANCH, sm70 FA ON)..."
 pct exec "${LXC_ID}" -- mkdir -p /root/ai-engine-bootstrap
-pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh --perms 0755
+pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/ai-engine-bootstrap/configure-hlh-ai-engine-v100.sh --perms 0755
 pct push "${LXC_ID}" "/usr/bin/nvidia-smi" "/tmp/nvidia-smi" --perms 0755
-pct exec "${LXC_ID}" -- bash /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh
+pct exec "${LXC_ID}" -- bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-v100.sh --bootstrap-inside
 
 echo "[6/6] Deployment complete. LXC ${LXC_ID} (${LXC_NAME}) is running."
 echo "Model storage: ${MODEL_HOST_DIR} (host) <-> ${MODEL_LXC_DIR} (container) on ${POOL} (755, root managed)"
