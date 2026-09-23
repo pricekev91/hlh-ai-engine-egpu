@@ -42,11 +42,12 @@ Deploy the V100 CUDA AI engine LXC on the Proxmox host (nukes 131, stops 130, in
 ./deploy-hlh-ai-engine-v100.sh --skip-host-driver
 ```
 
-Reconfigure an existing LXC via Ansible (no recreate):
+Reconfigure an existing LXC via bash (no recreate, no ansible):
 
 ```bash
 ./configure-hlh-ai-engine-v100.sh
 ./configure-hlh-ai-engine-v100.sh --host 192.168.1.31
+./configure-hlh-ai-engine-v100.sh --via-ssh --host 192.168.1.31
 ```
 
 Switch loaded models (inside LXC after deployment):
@@ -61,31 +62,10 @@ nvidia-smi -L; nvidia-smi
 
 ## Deployment Model
 
-Deployment and configuration are separate phases:
+Two bash scripts (no ansible/opentofu - easiest for AI):
 
-1. **Provisioning**: `deploy-hlh-ai-engine-v100.sh` creates the privileged LXC, wires CUDA passthrough (`/dev/nvidia*` — single GV100), and pushes the in-container bootstrap script. If host `nvidia` 550 not loaded, it blacklists `nouveau`, ensures trixie non-free + CUDA debian13 repo, installs `nvidia-driver=550.163.01-2` (DKMS), and reboots. Last driver for Volta is R580 (580.65.06) with CUDA 12.8/12.9 - trixie stable currently has 550; set `NVIDIA_DRIVER_VERSION=580.65.06-0ubuntu1 DRIVER_BRANCH=580` to use 580 when packaged.
-2. **Configuration**: `ansible/playbooks/hlh-ai-engine-v100.yml` (hosts `hlh_ai_engine_v100`) runs `ansible/files/configure-ai-engine-inside-lxc.sh` via `pct exec` or SSH.
-
-## OpenTofu Module
-
-For programmatic LXC creation via OpenTofu (bind mount, not storage volume):
-
-```hcl
-module "hlh_ai_engine_v100" {
-  source = "./opentofu"
-  pm_api_url          = var.pm_api_url
-  pm_api_token_id     = var.pm_api_token_id
-  pm_api_token_secret = var.pm_api_token_secret
-  target_node         = "prox01"
-  hostname            = "hlh-ai-engine-v100"
-  vmid                = 131
-  ip_cidr             = "192.168.1.31/24"
-  memory              = 8192
-  ostemplate          = "local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
-  # mp0 is bind mount: volume = "/srv/ai/models" mp = "/srv/ai/models"
-}
-# cgroup/mount for /dev/nvidia* is appended by deploy script post-create
-```
+1. **Provisioning**: `deploy-hlh-ai-engine-v100.sh` creates the privileged LXC, wires CUDA passthrough (`/dev/nvidia*` — single GV100), and pushes the in-container bootstrap script. If host `nvidia` driver not loaded, it blacklists `nouveau`, ensures trixie non-free + CUDA debian13 repo, installs `nvidia-driver` (kernel-aware: 470 on 7.0.14, 550 on 6.5) via DKMS, and reboots. Last driver for Volta is R580 (580.65.06) with CUDA 12.8/12.9 - trixie stable currently has 550; set `NVIDIA_DRIVER_VERSION=580.65.06-0ubuntu1 DRIVER_BRANCH=580` to use 580 when packaged.
+2. **Configuration**: `configure-hlh-ai-engine-v100.sh` re-runs `configure-ai-engine-inside-lxc.sh` inside the LXC via `pct exec` (if on prox01) or `ssh` (fallback) - same bash, no ansible. `configure-ai-engine-inside-lxc.sh` is the single bootstrap that installs CUDA toolkit, builds llama.cpp `sm70 FA ON`, and creates `v100-switch-model.sh`.
 
 ## Runtime Contract
 
@@ -107,17 +87,10 @@ module "hlh_ai_engine_v100" {
 
 ```
 hlh-ai-engine-v100/
-├── deploy-hlh-ai-engine-v100.sh    # LXC creation + CUDA passthrough + bootstrap (550 + CUDA 12.4 sm70)
-├── configure-hlh-ai-engine-v100.sh # Ansible-based reconfiguration
-├── ansible/
-│   ├── inventories/hlh-ai-engine-v100.yml  # 192.168.1.31
-│   ├── playbooks/hlh-ai-engine-v100.yml    # hosts: hlh_ai_engine_v100
-│   └── files/
-│       ├── configure-ai-engine-inside-lxc.sh   # v1.0.0-v100 CUDA 12.4 + 550 sm70 FA ON
-│       └── v100-switch-model.sh                # standalone copy
-├── opentofu/
-│   ├── main.tf      # mp0 bind mount, cgroup via deploy
-│   └── variables.tf # vmid 131, driver 550.163.01, CUDA 12.4.1
+├── deploy-hlh-ai-engine-v100.sh       # Provision: LXC creation + CUDA passthrough + bootstrap (bash)
+├── configure-hlh-ai-engine-v100.sh    # Configuration: re-run bootstrap via pct exec/ssh (bash, no ansible)
+├── configure-ai-engine-inside-lxc.sh  # Bootstrap inside LXC: CUDA toolkit + llama.cpp sm70 FA ON (single file)
+├── v100-switch-model.sh               # Standalone model switcher (also generated inside LXC)
 ├── 00_BACKLOG.md
 ├── 10_ACTIVE.md
 ├── 90_DONE.md
