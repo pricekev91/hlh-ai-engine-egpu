@@ -48,7 +48,7 @@ done
 if $BOOTSTRAP_INSIDE; then
 	# --- BEGIN BOOTSTRAP LOGIC (formerly configure-ai-engine-inside-lxc.sh) ---
 # configure-ai-engine-inside-lxc.sh
-# Version: 1.0.0-v100-cuda
+# Version: 1.0.1-egpu-cuda (fix: stale CUDA list without key broke every apt-get update; curl/gpg missing on minimal template; jammy pin deleted after creation)
 # Description: Bootstrap llama.cpp AI engine on Ubuntu 24.04 LXC with CUDA for Tesla V100 (GV100 32GB cc 7.0) via OCuLink
 # Target GPU: NVIDIA Tesla V100 GV100GL PG500-216 (32GB HBM2) single via OCuLink c5:00.0 on Proxmox 9.x privileged LXC
 # Backend: GGML_CUDA=ON arch 70, FA ON, CUDA 12.4 + driver 550.163.01 (last stable for Volta in Debian trixie; R580 last overall)
@@ -95,26 +95,78 @@ SHARED_SWITCH_SCRIPT="${MODEL_DIR}/egpu-switch-model.sh"
 echo "[1/7] Installing base dependencies + CUDA $CUDA_MAJOR + driver ${NVIDIA_DRIVER_VERSION} userspace..."
 export DEBIAN_FRONTEND=noninteractive
 export LANG=C LC_ALL=C
+# Repair stale broken CUDA repo (list without key) from a previous failed run.
+# A list file without its keyring makes EVERY apt-get update fail (E: not signed)
+# and with set -e aborts the bootstrap before curl/gpg are even installed.
+if [ -f /etc/apt/sources.list.d/cuda-ubuntu2404.list ] && [ ! -s /usr/share/keyrings/cuda-ubuntu2404.gpg ]; then
+  echo "  Removing stale cuda-ubuntu2404.list (missing keyring)..."
+  rm -f /etc/apt/sources.list.d/cuda-ubuntu2404.list
+fi
+if [ -f /etc/apt/sources.list.d/cuda-ubuntu2204.list ] && [ ! -s /usr/share/keyrings/cuda-ubuntu2204.gpg ]; then
+  echo "  Removing stale cuda-ubuntu2204.list (missing keyring)..."
+  rm -f /etc/apt/sources.list.d/cuda-ubuntu2204.list
+fi
+apt_retry() {
+  local n=1 max=3
+  while [ $n -le $max ]; do
+    if apt-get update 2>&1 | tail -n 10; then return 0; fi
+    echo "  WARNING: apt-get update failed (attempt $n/$max), retrying..." >&2
+    sleep 5; n=$((n+1))
+  done
+  echo "ERROR: apt-get update failed after $max attempts" >&2
+  return 1
+}
+fetch_key() {
+  # $1=url $2=dest — curl preferred, wget fallback (minimal LXC has no curl/gpg yet)
+  local url="$1" dest="$2" tmp_pub
+  tmp_pub="$(mktemp)"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --retry 3 --retry-delay 5 "$url" -o "$tmp_pub" || { rm -f "$tmp_pub"; return 1; }
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -O "$tmp_pub" "$url" || { rm -f "$tmp_pub"; return 1; }
+  else
+    echo "ERROR: neither curl nor wget available to fetch $url" >&2
+    rm -f "$tmp_pub"; return 1
+  fi
+  [ -s "$tmp_pub" ] || { echo "ERROR: downloaded key is empty: $url" >&2; rm -f "$tmp_pub"; return 1; }
+  if command -v gpg >/dev/null 2>&1; then
+    gpg --dearmor -o "$dest" "$tmp_pub" || { rm -f "$tmp_pub"; return 1; }
+  else
+    # No gpg yet — key is ASCII; store dearmored later after gnupg install.
+    # For now keep ASCII and convert after base install.
+    cp "$tmp_pub" "${dest}.asc" || { rm -f "$tmp_pub"; return 1; }
+  fi
+  rm -f "$tmp_pub"
+}
 if ! locale -a 2>&1 | grep -qi "en_US.utf8"; then
-  apt-get update && apt-get install -y locales 2>&1 | tail -n 5 || true
+  apt_retry && apt-get install -y locales 2>&1 | tail -n 5 || true
   locale-gen en_US.UTF-8 2>&1 | tail -n 5 || true
   update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 2>&1 | tail -n 5 || true
 fi
 export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 2>/dev/null || true
-apt-get update
+# Base tools FIRST (from Ubuntu archives only — CUDA repo not added yet),
+# so curl/gpg exist before any CUDA key download.
+apt_retry
 apt-get install -y --no-install-recommends \
+  ca-certificates wget curl gnupg \
   build-essential git cmake pkg-config \
-  python3 python3-pip curl wget unzip bc \
-  libopenblas-dev libssl-dev ca-certificates gnupg \
+  python3 python3-pip unzip bc \
+  libopenblas-dev libssl-dev \
   openssh-server
+# If key was fetched as ASCII (no gpg at fetch time), dearmor it now.
+for f in /usr/share/keyrings/cuda-*.asc; do
+  [ -f "$f" ] || continue
+  gpg --dearmor -o "${f%.asc}.gpg" "$f" && rm -f "$f" || true
+done
 
-# Add NVIDIA CUDA repo matching host driver branch
+# Add NVIDIA CUDA repo matching host driver branch (key verified BEFORE list written)
 if [[ "$CUDA_REPO" == "ubuntu2204" ]]; then
-  if [ ! -f /etc/apt/sources.list.d/cuda-ubuntu2204.list ]; then
+  if [ ! -s /usr/share/keyrings/cuda-ubuntu2204.gpg ]; then
     echo "  Adding CUDA ubuntu2204 repo for toolkit $CUDA_MAJOR (470 branch)..."
-    curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/3bf863cc.pub | gpg --dearmor -o /usr/share/keyrings/cuda-ubuntu2204.gpg 2>/dev/null || true
+    rm -f /etc/apt/sources.list.d/cuda-ubuntu2204.list
+    fetch_key "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/3bf863cc.pub" "/usr/share/keyrings/cuda-ubuntu2204.gpg" || { echo "ERROR: Failed to fetch CUDA ubuntu2204 key after 3 attempts: Connection error." >&2; exit 1; }
     echo "deb [signed-by=/usr/share/keyrings/cuda-ubuntu2204.gpg] https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64 /" > /etc/apt/sources.list.d/cuda-ubuntu2204.list
-    apt-get update 2>&1 | tail -n 10 || true
+    apt_retry || { echo "ERROR: apt-get update failed after adding CUDA repo" >&2; exit 1; }
   fi
   # jammy libtinfo5 needed for 11.8 on noble
   if ! grep -q "jammy" /etc/apt/sources.list.d/* 2>/dev/null; then
@@ -124,23 +176,23 @@ Package: libtinfo5 libncurses5
 Pin: release n=jammy
 Pin-Priority: 100
 PIN
-    apt-get update 2>&1 | tail -n 10 || true
+    apt_retry || true
   fi
 else
-  if [ ! -f /etc/apt/sources.list.d/cuda-ubuntu2404.list ]; then
+  if [ ! -s /usr/share/keyrings/cuda-ubuntu2404.gpg ]; then
     echo "  Adding CUDA ubuntu2404 repo for toolkit $CUDA_MAJOR..."
-    curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/3bf863cc.pub | gpg --dearmor -o /usr/share/keyrings/cuda-ubuntu2404.gpg 2>/dev/null || true
+    rm -f /etc/apt/sources.list.d/cuda-ubuntu2404.list
+    fetch_key "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/3bf863cc.pub" "/usr/share/keyrings/cuda-ubuntu2404.gpg" || { echo "ERROR: Failed to fetch CUDA ubuntu2404 key after 3 attempts: Connection error." >&2; exit 1; }
     echo "deb [signed-by=/usr/share/keyrings/cuda-ubuntu2404.gpg] https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64 /" > /etc/apt/sources.list.d/cuda-ubuntu2404.list
-    apt-get update 2>&1 | tail -n 10 || true
+    apt_retry || { echo "ERROR: apt-get update failed after adding CUDA repo" >&2; exit 1; }
   fi
 fi
 
-# Clean stale vulkan-only pins
-rm -f /etc/apt/preferences.d/jammy-libtinfo5-pin 2>/dev/null || true
-if [[ "$CUDA_REPO" == "ubuntu2404" ]]; then rm -f /etc/apt/sources.list.d/cuda-ubuntu2204.list 2>/dev/null || true; fi
+# Clean stale repos/pins from the OTHER branch only (never delete the pin just created above)
+if [[ "$CUDA_REPO" == "ubuntu2404" ]]; then rm -f /etc/apt/sources.list.d/cuda-ubuntu2204.list /etc/apt/sources.list.d/jammy-libtinfo5.list 2>/dev/null || true; fi
 
 # Userspace driver must match host for nvidia-smi (V100 Volta)
-apt-get update
+apt_retry
 if [[ "$CUDA_MAJOR" == "11.8" ]]; then
   echo "  Installing CUDA toolkit $CUDA_MAJOR + nvidia userspace $NVIDIA_DRIVER_VERSION (470 branch)..."
   apt-get install -y --no-install-recommends libtinfo5 2>&1 | tail -n 10 || true
