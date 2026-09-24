@@ -83,7 +83,7 @@ fi
 
 # --- CONFIGURABLE ---
 MODEL_DIR="/srv/ai/models"
-DEFAULT_MODEL_FILE="Mellum2-12B-A2.5B-Thinking-Q3_K_M.gguf"
+DEFAULT_MODEL_FILE="Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf"
 LLAMA_CPP_REPO="https://github.com/ggerganov/llama.cpp.git"
 LLAMA_CPP_DIR="/opt/llama.cpp"
 SERVICE_NAME="ai-engine"
@@ -294,9 +294,9 @@ if [ -f "${MODEL_DIR}/${DEFAULT_MODEL_FILE}" ]; then
   echo "Default model already present on shared mount: $ACTIVE_MODEL_FILE"
 else
   PREFERRED_MODELS=(
+    "Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf"
     "Mellum2-12B-A2.5B-Thinking-Q3_K_M.gguf"
     "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
-    "Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf"
   )
   for MODEL_CANDIDATE in "${PREFERRED_MODELS[@]}"; do
     if [ -f "${MODEL_DIR}/${MODEL_CANDIDATE}" ]; then
