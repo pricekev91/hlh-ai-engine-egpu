@@ -16,8 +16,7 @@ V100 eGPU path (Tesla V100 GV100GL 32GB via OCuLink) - CUDA:
 	4) Start container + push/run CUDA bootstrap (GGML_CUDA=ON arch 70, FA ON)
 
 NOTES:
-	- Single OCuLink slot: LXC 111 is the workhorse; legacy 130 (vulkan) and 131 (old ID) cannot run with it.
-	  The script stops legacy IDs if running and documents manual swap.
+	- Single OCuLink slot: LXC 111 only.
 	- V100 is Volta (cc 7.0) - last driver R580 (580.65.06) is last supporting Volta.
 	  Debian trixie stable currently packages 550.163.01 (supports CUDA 12.4).
 	  Script pins host to 550.163.01-2 (trixie non-free) + LXC CUDA 12.4 from ubuntu2404.
@@ -57,7 +56,6 @@ CUDA_MAJOR="${CUDA_MAJOR:-$DEFAULT_MAJOR}"
 DRIVER_BRANCH="${DRIVER_BRANCH:-$DEFAULT_BRANCH}"
 
 LXC_ID=111
-LEGACY_LXC_IDS="131 130"
 LXC_NAME="hlh-ai-engine-egpu"
 LXC_HOSTNAME="hlh-ai-engine-egpu"
 LXC_IMAGE="local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
@@ -215,27 +213,6 @@ mkdir -p "${MODEL_HOST_DIR}"
 chown 0:0 "${MODEL_HOST_DIR}"
 chmod 755 "${MODEL_HOST_DIR}"
 
-# Single slot arbitration: legacy 130/.30 and 131/.31 retired — workhorse is 111/.11.
-# If legacy exists (same IP .11 for 131), prompt to nuke to avoid IP/GPU-slot conflict.
-for LEGACY_ID in $LEGACY_LXC_IDS; do
-if pct status "$LEGACY_ID" >/dev/null 2>&1; then
-	echo "[1/6] Found legacy LXC $LEGACY_ID (retired one-time ID, use 111/.11 instead)."
-	if pct status "$LEGACY_ID" 2>&1 | grep -q "running"; then
-		echo "[1/6] Stopping legacy LXC $LEGACY_ID — single OCuLink slot (now 111)"
-		pct stop "$LEGACY_ID" || true
-		sleep 3
-	fi
-	printf '%s' "Delete legacy LXC $LEGACY_ID to avoid IP/GPU conflict? [y/N] "
-	read -r legacy_answer
-	case "$legacy_answer" in y|Y|yes|YES)
-		echo "[1/6] Deleting legacy LXC $LEGACY_ID..."
-		pct destroy "$LEGACY_ID" >/dev/null 2>&1 || pct delete "$LEGACY_ID" || true
-		;;
-	*) echo "[1/6] Keeping stopped legacy LXC $LEGACY_ID (must stay stopped — .11 IP conflict risk)." ;;
-	esac
-fi
-done
-
 if pct status "${LXC_ID}" >/dev/null 2>&1; then
 	confirm_existing_lxc_delete
 	echo "[1/6] Deleting existing LXC ${LXC_ID}..."
@@ -298,4 +275,3 @@ echo "Model storage: ${MODEL_HOST_DIR} (host) <-> ${MODEL_LXC_DIR} (container) o
 echo "Access llama-server at http://192.168.1.11:80"
 echo "Host driver pinned: $NVIDIA_DRIVER_VERSION_SHORT (branch $DRIVER_BRANCH) CUDA $CUDA_MAJOR Volta V100 32GB sm70"
 echo "Verify inside LXC: nvidia-smi -L && nvidia-smi && /opt/llama.cpp/build/bin/llama-server --version && nvidia-smi dmon"
-echo "Note: Single OCuLink slot — legacy 130/131 retired, workhorse is now 111: pct stop 131; pct stop 130"
