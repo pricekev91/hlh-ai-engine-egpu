@@ -65,7 +65,7 @@ POOL="RaidZ1-6TB"
 MODEL_HOST_DIR="/srv/ai/models"
 MODEL_LXC_DIR="/srv/ai/models"
 LXC_ROOTFS_SIZE="64"
-LXC_MEMORY="8192"
+LXC_MEMORY="24576"
 LXC_CORES="12"
 LXC_IP_CONFIG="192.168.1.11/24"
 LXC_GATEWAY="192.168.1.1"
@@ -215,14 +215,24 @@ mkdir -p "${MODEL_HOST_DIR}"
 chown 0:0 "${MODEL_HOST_DIR}"
 chmod 755 "${MODEL_HOST_DIR}"
 
-# Single slot arbitration: stop legacy 130/131 if running (migrated to 111)
+# Single slot arbitration: legacy 130/.30 and 131/.31 retired — workhorse is 111/.11.
+# If legacy exists (same IP .11 for 131), prompt to nuke to avoid IP/GPU-slot conflict.
 for LEGACY_ID in $LEGACY_LXC_IDS; do
 if pct status "$LEGACY_ID" >/dev/null 2>&1; then
+	echo "[1/6] Found legacy LXC $LEGACY_ID (retired one-time ID, use 111/.11 instead)."
 	if pct status "$LEGACY_ID" 2>&1 | grep -q "running"; then
 		echo "[1/6] Stopping legacy LXC $LEGACY_ID — single OCuLink slot (now 111)"
 		pct stop "$LEGACY_ID" || true
 		sleep 3
 	fi
+	printf '%s' "Delete legacy LXC $LEGACY_ID to avoid IP/GPU conflict? [y/N] "
+	read -r legacy_answer
+	case "$legacy_answer" in y|Y|yes|YES)
+		echo "[1/6] Deleting legacy LXC $LEGACY_ID..."
+		pct destroy "$LEGACY_ID" >/dev/null 2>&1 || pct delete "$LEGACY_ID" || true
+		;;
+	*) echo "[1/6] Keeping stopped legacy LXC $LEGACY_ID (must stay stopped — .11 IP conflict risk)." ;;
+	esac
 fi
 done
 

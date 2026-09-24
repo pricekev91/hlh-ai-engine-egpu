@@ -15,7 +15,7 @@ host `prox01` (192.168.1.10). It is a sibling of `hlh-ai-engine` (ROCm 890M) and
 - Single GV100 at `c5:00.0` (10de:1df0 rev a1) via GPP `00:03.1` OCuLink x4 (currently 8GT/s x2), IOMMU 20, exposed as `nvidia0`
 - llama.cpp `GGML_CUDA=ON` `ARCH=70` `FA=ON` (Volta supports Flash Attention), native web UI on port 80
 - Model storage **same path host and CT** via bind mount: host `RaidZ1-6TB` ZFS dataset `RaidZ1-6TB/ai/models` at `/srv/ai/models` → LXC `/srv/ai/models` (`755`, `root` managed, homelab, `zfs xattr,noacl`)
-- LXC 8192 MB RAM, 12 cores, 64 GiB rootfs on `RaidZ1-6TB` pool, privileged `nesting=1,keyctl=1,fuse=1`, `onboot 1` (single OCuLink slot — workhorse 111, legacy 130/131 retired)
+- LXC 24576 MB RAM (24GB), 12 cores, 64 GiB rootfs on `RaidZ1-6TB` pool, privileged `nesting=1,keyctl=1,fuse=1`, `onboot 1` (single OCuLink slot — workhorse 111, legacy 130/131 retired; 8GB OOM-crashes llama.cpp on 27-35B + 32K KV, V100 VRAM fixed 32GB HBM2)
 
 > **32GB VRAM:** V100 32GB is single-GPU (unlike K80 2x12GB). llama.cpp uses `CUDA_VISIBLE_DEVICES=0` (single). Context window defaults to 32K (q4_0 KV ≈ 4GB) - 32GB allows 70B Q4 + 32K, or 35B Q4 + 64K. Use `egpu-switch-model.sh` to adjust ctx/KV. MTP draft still experimental on Volta; use `none` or `ngram`.
 
@@ -80,7 +80,7 @@ Two bash scripts only (no ansible/opentofu):
 | Driver / CUDA | Host `580.65.06` `CUDA 13.0` (R580 last for Volta, CC 7.0); CT `CUDA 12.8` `libnvidia-compute-580`/`nvidia-utils-580` from `ubuntu2404` (12.8 final sm70) |
 | Llama.cpp | `GGML_CUDA=ON` `CMAKE_CUDA_ARCHITECTURES=70` `FA=ON` `FORCE_DMMV/MMQ=ON`, `gcc-13` (`CUDA 12.8` needs `≤13`) |
 | Default model | `Qwen3.8-27B-MTP-Q4_K_M.gguf` (17GB on RaidZ1-6TB, 128K ctx q4_0 MTP FA ON) |
-| LXC | 111, 8192 MB RAM, 12 cores, 64G rootfs RaidZ1-6TB, `nesting=1,keyctl=1,fuse=1` |
+| LXC | 111, 24576 MB RAM (24GB), 12 cores, 64G rootfs RaidZ1-6TB, `nesting=1,keyctl=1,fuse=1` |
 | Single slot | OCuLink c5:00.0 — exclusive to 111 (legacy 130/131 retired) |
 
 ## Repository Layout
