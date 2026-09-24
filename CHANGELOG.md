@@ -5,6 +5,15 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0-egpu] - 2026-09-24
+
+### Changed
+
+- **Repo renamed** `hlh-ai-engine-v100` → `hlh-ai-engine-egpu` — named for the OCuLink slot, not the card (card may change; slot IP is stable).
+- **IP** `192.168.1.31` → `192.168.1.11` — new slot-based scheme: `.10` host, `.11` OCuLink eGPU workhorse, `.12+` iGPU engines.
+- **Hostname** `hlh-ai-engine-v100` → `hlh-ai-engine-egpu`; switch helper `v100-switch-model.sh` → `egpu-switch-model.sh`.
+- Scripts renamed `deploy-/configure-hlh-ai-engine-egpu.sh`. VMID stays `131`. Tesla V100 32GB card unchanged.
+
 ## [2.1.0-v100] - 2026-09-24
 
 ### Fixed

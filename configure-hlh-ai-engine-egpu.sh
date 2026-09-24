@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# configure-hlh-ai-engine-v100.sh - 2nd script (configuration) for hlh-ai-engine-v100
+# configure-hlh-ai-engine-egpu.sh - 2nd script (configuration) for hlh-ai-engine-egpu
 # Pure bash, no ansible/opentofu. One for provision (deploy), one for configuration.
 # Usage:
-#   ./configure-hlh-ai-engine-v100.sh [--host <ip>] [--via-ssh]          # host-side: pushes and runs bootstrap inside LXC
-#   ./configure-hlh-ai-engine-v100.sh --bootstrap-inside                 # inside LXC: runs the actual bootstrap (called via pct exec)
+#   ./configure-hlh-ai-engine-egpu.sh [--host <ip>] [--via-ssh]          # host-side: pushes and runs bootstrap inside LXC
+#   ./configure-hlh-ai-engine-egpu.sh --bootstrap-inside                 # inside LXC: runs the actual bootstrap (called via pct exec)
 # When invoked via pct exec or ssh, the bootstrap logic runs inside the target LXC.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LXC_ID=131
-DEFAULT_HOST="192.168.1.31"
+DEFAULT_HOST="192.168.1.11"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
 HOST_OVERRIDE=""
 VIA_SSH=false
@@ -19,11 +19,11 @@ BOOTSTRAP_INSIDE=false
 usage() {
 	cat <<'EOF'
 Usage:
-	./configure-hlh-ai-engine-v100.sh [--host <ip>] [--via-ssh]
-	./configure-hlh-ai-engine-v100.sh --bootstrap-inside   (run inside LXC)
+	./configure-hlh-ai-engine-egpu.sh [--host <ip>] [--via-ssh]
+	./configure-hlh-ai-engine-egpu.sh --bootstrap-inside   (run inside LXC)
 
 Options:
-  --host <ip>          Override target host (default 192.168.1.31 or LXC 131 via pct if local)
+  --host <ip>          Override target host (default 192.168.1.11 or LXC 131 via pct if local)
   --via-ssh            Force ssh even if pct is available
   --bootstrap-inside   Run bootstrap logic inside LXC (invoked via pct exec, not manually)
   -h, --help           Show this help.
@@ -88,8 +88,8 @@ LLAMA_CPP_REPO="https://github.com/ggerganov/llama.cpp.git"
 LLAMA_CPP_DIR="/opt/llama.cpp"
 SERVICE_NAME="ai-engine"
 SYSTEMD_SERVICE="/etc/systemd/system/${SERVICE_NAME}.service"
-SWITCH_SCRIPT="/usr/local/bin/v100-switch-model.sh"
-SHARED_SWITCH_SCRIPT="${MODEL_DIR}/v100-switch-model.sh"
+SWITCH_SCRIPT="/usr/local/bin/egpu-switch-model.sh"
+SHARED_SWITCH_SCRIPT="${MODEL_DIR}/egpu-switch-model.sh"
 
 # --- 1. BASE DEPENDENCIES + CUDA TOOLKIT ---
 echo "[1/7] Installing base dependencies + CUDA $CUDA_MAJOR + driver ${NVIDIA_DRIVER_VERSION} userspace..."
@@ -400,7 +400,7 @@ fi
 echo "[5/7] Creating model switcher: $SWITCH_SCRIPT (Tesla V100 32GB CUDA) -> $SHARED_SWITCH_SCRIPT..."
 cat > "$SWITCH_SCRIPT" << 'EOS'
 #!/usr/bin/env bash
-# v100-switch-model.sh
+# egpu-switch-model.sh
 # Version: 1.0.0-v100-cuda
 # Description: Interactive model switcher for llama.cpp ai-engine service (Tesla V100 GV100 32GB CUDA)
 set -euo pipefail
@@ -456,7 +456,7 @@ rewrite_execstart() {
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════════╗"
-echo "║        v100-switch-model.sh (Tesla V100 GV100 32GB CUDA)        ║"
+echo "║        egpu-switch-model.sh (Tesla V100 GV100 32GB CUDA)        ║"
 echo "╠══════════════════════════════════════════════════════════════════╣"
 echo "║  BACKEND  CUDA sm70 (FA ON)  32GB HBM2 single GPU 0000:c5:00.0  ║"
 echo "║  VRAM BUDGET  32GB single - much larger than K80 2x12GB        ║"
@@ -734,8 +734,8 @@ ${LLAMA_CPP_DIR}/build/bin/llama-server --version 2>&1 | head -5 || true
 systemctl status "$SERVICE_NAME" --no-pager | head -30
 echo ""
 echo "[Bootstrap complete - V100 CUDA $CUDA_MAJOR + $NVIDIA_DRIVER_VERSION sm70 FA ON, 32GB single-GPU]"
-echo "  Web UI: http://<container-ip>:80 (LXC 131 -> 192.168.1.31:80)"
-echo "  Switch: v100-switch-model.sh (also /srv/ai/models/v100-switch-model.sh)"
+echo "  Web UI: http://<container-ip>:80 (LXC 131 -> 192.168.1.11:80)"
+echo "  Switch: egpu-switch-model.sh (also /srv/ai/models/egpu-switch-model.sh)"
 echo "  Backend: CUDA sm70 (V100 32GB)"
 echo "  Verify: nvidia-smi -L; nvtop; nvidia-smi dmon"
 	# --- END BOOTSTRAP LOGIC ---
@@ -749,11 +749,11 @@ if ! $VIA_SSH && command -v pct >/dev/null 2>&1 && pct status "$LXC_ID" >/dev/nu
 	if pct status "$LXC_ID" 2>&1 | grep -q "running"; then
 		echo "[configure] Using pct exec for LXC $LXC_ID ($TARGET_HOST)..."
 		pct exec "$LXC_ID" -- mkdir -p /root/ai-engine-bootstrap
-		pct push "$LXC_ID" "$0" /root/ai-engine-bootstrap/configure-hlh-ai-engine-v100.sh --perms 0755
+		pct push "$LXC_ID" "$0" /root/ai-engine-bootstrap/configure-hlh-ai-engine-egpu.sh --perms 0755
 		if [[ -x /usr/bin/nvidia-smi ]]; then
 			pct push "$LXC_ID" "/usr/bin/nvidia-smi" "/tmp/nvidia-smi" --perms 0755 || true
 		fi
-		pct exec "$LXC_ID" -- bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-v100.sh --bootstrap-inside
+		pct exec "$LXC_ID" -- bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-egpu.sh --bootstrap-inside
 		echo "[configure] Done via pct exec."
 		exit 0
 	fi
@@ -763,9 +763,9 @@ fi
 echo "[configure] Using ssh root@$TARGET_HOST..."
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
 if [[ -f "$SSH_KEY" ]]; then SSH_OPTS="$SSH_OPTS -i $SSH_KEY"; fi
-scp $SSH_OPTS "$0" root@"$TARGET_HOST":/tmp/configure-hlh-ai-engine-v100.sh 2>&1 | head -n 20
+scp $SSH_OPTS "$0" root@"$TARGET_HOST":/tmp/configure-hlh-ai-engine-egpu.sh 2>&1 | head -n 20
 if [[ -x /usr/bin/nvidia-smi ]]; then
 	scp $SSH_OPTS /usr/bin/nvidia-smi root@"$TARGET_HOST":/tmp/nvidia-smi 2>&1 | head -n 20 || true
 fi
-ssh $SSH_OPTS root@"$TARGET_HOST" "bash /tmp/configure-hlh-ai-engine-v100.sh --bootstrap-inside" 2>&1
+ssh $SSH_OPTS root@"$TARGET_HOST" "bash /tmp/configure-hlh-ai-engine-egpu.sh --bootstrap-inside" 2>&1
 echo "[configure] Done via ssh."

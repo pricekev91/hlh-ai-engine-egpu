@@ -40,14 +40,14 @@ in the codebase.
 
 - [DONE] `mp0` bind mount fix: `volume="/srv/ai/models"` `mp="/srv/ai/models"` (was `path`+`storage` new volume) — host and CT same path
 - Add tofu variables for GPU PCI IDs (currently hardcoded via cgroup rules `c7:00.0`/`c8:00.0` + switch `c5:00.0`)
-- Add tofu output for container IP and API endpoint (192.168.1.31)
+- Add tofu output for container IP and API endpoint (192.168.1.11)
 - Add tofu state locking for multi-operator safety
 - Migrate from telmate/proxmox to bpg/proxmox provider (align with hlh-docker)
 
 ## Networking (131)
 
 - [DONE] LXC 131 hostname: hlh-ai-engine-egpu-k80, IP: 192.168.1.31, port 80
-- Add DNS entry for engine API endpoint (k80: hlh-ai-engine-egpu-k80.local / 192.168.1.31)
+- Add DNS entry for engine API endpoint (egpu: hlh-ai-engine-egpu.local / 192.168.1.11)
 - Add HTTPS/TLS termination on nginx reverse proxy
 - Add rate limiting configuration for API endpoints
 - Add API key authentication for external consumers

@@ -2,16 +2,16 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BOOTSTRAP_SCRIPT="${SCRIPT_DIR}/configure-hlh-ai-engine-v100.sh"
+BOOTSTRAP_SCRIPT="${SCRIPT_DIR}/configure-hlh-ai-engine-egpu.sh"
 
 usage() {
 	cat <<'EOF'
 Usage:
-	./deploy-hlh-ai-engine-v100.sh [--skip-host-driver]
+	./deploy-hlh-ai-engine-egpu.sh [--skip-host-driver]
 
 V100 eGPU path (Tesla V100 GV100GL 32GB via OCuLink) - CUDA:
 	1) Verify/install NVIDIA 550/580 on Proxmox host (pinned, Volta GV100 cc 7.0)
-	2) Create privileged LXC 131 (hlh-ai-engine-v100) at 192.168.1.31
+	2) Create privileged LXC 131 (hlh-ai-engine-egpu) at 192.168.1.11
 	3) Add cgroup + /dev/nvidia* bind-mounts for single GV100 (c5:00.0)
 	4) Start container + push/run CUDA bootstrap (GGML_CUDA=ON arch 70, FA ON)
 
@@ -57,8 +57,8 @@ CUDA_MAJOR="${CUDA_MAJOR:-$DEFAULT_MAJOR}"
 DRIVER_BRANCH="${DRIVER_BRANCH:-$DEFAULT_BRANCH}"
 
 LXC_ID=131
-LXC_NAME="hlh-ai-engine-v100"
-LXC_HOSTNAME="hlh-ai-engine-v100"
+LXC_NAME="hlh-ai-engine-egpu"
+LXC_HOSTNAME="hlh-ai-engine-egpu"
 LXC_IMAGE="local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
 POOL="RaidZ1-6TB"
 MODEL_HOST_DIR="/srv/ai/models"
@@ -66,7 +66,7 @@ MODEL_LXC_DIR="/srv/ai/models"
 LXC_ROOTFS_SIZE="64"
 LXC_MEMORY="8192"
 LXC_CORES="12"
-LXC_IP_CONFIG="192.168.1.31/24"
+LXC_IP_CONFIG="192.168.1.11/24"
 LXC_GATEWAY="192.168.1.1"
 
 SKIP_HOST_DRIVER=false
@@ -84,7 +84,7 @@ command -v pct >/dev/null 2>&1 || { echo "ERROR: pct not found. Run on Proxmox h
 
 confirm_existing_lxc_delete() {
 	local answer
-	printf '%s\n' 'Are you sure?  hlh-ai-engine-v100 is already running!'
+	printf '%s\n' 'Are you sure?  hlh-ai-engine-egpu is already running!'
 	printf '%s' 'Delete it and redeploy? [y/N] '
 	read -r answer
 	case "$answer" in y|Y|yes|YES) return 0 ;; *) echo "Aborted." >&2; exit 1 ;; esac
@@ -272,13 +272,13 @@ sleep 5
 
 echo "[5/6] Running in-container CUDA bootstrap (CUDA $CUDA_MAJOR, driver $DRIVER_BRANCH, sm70 FA ON)..."
 pct exec "${LXC_ID}" -- mkdir -p /root/ai-engine-bootstrap
-pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/ai-engine-bootstrap/configure-hlh-ai-engine-v100.sh --perms 0755
+pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/ai-engine-bootstrap/configure-hlh-ai-engine-egpu.sh --perms 0755
 pct push "${LXC_ID}" "/usr/bin/nvidia-smi" "/tmp/nvidia-smi" --perms 0755
-pct exec "${LXC_ID}" -- bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-v100.sh --bootstrap-inside
+pct exec "${LXC_ID}" -- bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-egpu.sh --bootstrap-inside
 
 echo "[6/6] Deployment complete. LXC ${LXC_ID} (${LXC_NAME}) is running."
 echo "Model storage: ${MODEL_HOST_DIR} (host) <-> ${MODEL_LXC_DIR} (container) on ${POOL} (755, root managed)"
-echo "Access llama-server at http://192.168.1.31:80"
+echo "Access llama-server at http://192.168.1.11:80"
 echo "Host driver pinned: $NVIDIA_DRIVER_VERSION_SHORT (branch $DRIVER_BRANCH) CUDA $CUDA_MAJOR Volta V100 32GB sm70"
 echo "Verify inside LXC: nvidia-smi -L && nvidia-smi && /opt/llama.cpp/build/bin/llama-server --version && nvidia-smi dmon"
 echo "Note: Single OCuLink slot — stop 131 before starting 130: pct stop 131 && pct start 130"

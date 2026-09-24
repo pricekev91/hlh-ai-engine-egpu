@@ -3,6 +3,7 @@
 Active items in progress. These are the current focus areas.
 
 ## Active (K80 LXC 131 CUDA 11.8 + 470)
+- [x] ✅ 2026-09-24 Renamed to `hlh-ai-engine-egpu`, IP `192.168.1.31` → `192.168.1.11` (OCuLink workhorse slot), hostname + switch script renamed (VMID stays 131)
 
 - [x] ✅ Host driver 470.256.02 + CUDA 11.8 pinned (last for Kepler cc 3.7) — `nvidia-smi 470.256.02` 2×K80
 - [x] ✅ Host nvidia-uvm persistence dynamic major (511/507) via `nvidia-uvm-devices.service` Before `pve-guests`
