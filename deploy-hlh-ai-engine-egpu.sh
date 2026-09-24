@@ -11,13 +11,13 @@ Usage:
 
 V100 eGPU path (Tesla V100 GV100GL 32GB via OCuLink) - CUDA:
 	1) Verify/install NVIDIA 550/580 on Proxmox host (pinned, Volta GV100 cc 7.0)
-	2) Create privileged LXC 131 (hlh-ai-engine-egpu) at 192.168.1.11
+	2) Create privileged LXC 111 (hlh-ai-engine-egpu) at 192.168.1.11
 	3) Add cgroup + /dev/nvidia* bind-mounts for single GV100 (c5:00.0)
 	4) Start container + push/run CUDA bootstrap (GGML_CUDA=ON arch 70, FA ON)
 
 NOTES:
-	- Single OCuLink slot: LXC 130 (vulkan) and 131 (v100) cannot run together.
-	  The script stops 130 if running and documents manual swap.
+	- Single OCuLink slot: LXC 111 is the workhorse; legacy 130 (vulkan) and 131 (old ID) cannot run with it.
+	  The script stops legacy IDs if running and documents manual swap.
 	- V100 is Volta (cc 7.0) - last driver R580 (580.65.06) is last supporting Volta.
 	  Debian trixie stable currently packages 550.163.01 (supports CUDA 12.4).
 	  Script pins host to 550.163.01-2 (trixie non-free) + LXC CUDA 12.4 from ubuntu2404.
@@ -56,7 +56,8 @@ CUDA_VERSION="${CUDA_VERSION:-$DEFAULT_CUDA}"
 CUDA_MAJOR="${CUDA_MAJOR:-$DEFAULT_MAJOR}"
 DRIVER_BRANCH="${DRIVER_BRANCH:-$DEFAULT_BRANCH}"
 
-LXC_ID=131
+LXC_ID=111
+LEGACY_LXC_IDS="131 130"
 LXC_NAME="hlh-ai-engine-egpu"
 LXC_HOSTNAME="hlh-ai-engine-egpu"
 LXC_IMAGE="local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
@@ -214,14 +215,16 @@ mkdir -p "${MODEL_HOST_DIR}"
 chown 0:0 "${MODEL_HOST_DIR}"
 chmod 755 "${MODEL_HOST_DIR}"
 
-# Single slot arbitration: stop 130 if running
-if pct status 130 >/dev/null 2>&1; then
-	if pct status 130 2>&1 | grep -q "running"; then
-		echo "[1/6] Stopping LXC 130 (hlh-ai-engine-egpu-vulkan) — single OCuLink slot"
-		pct stop 130 || true
+# Single slot arbitration: stop legacy 130/131 if running (migrated to 111)
+for LEGACY_ID in $LEGACY_LXC_IDS; do
+if pct status "$LEGACY_ID" >/dev/null 2>&1; then
+	if pct status "$LEGACY_ID" 2>&1 | grep -q "running"; then
+		echo "[1/6] Stopping legacy LXC $LEGACY_ID — single OCuLink slot (now 111)"
+		pct stop "$LEGACY_ID" || true
 		sleep 3
 	fi
 fi
+done
 
 if pct status "${LXC_ID}" >/dev/null 2>&1; then
 	confirm_existing_lxc_delete
@@ -285,4 +288,4 @@ echo "Model storage: ${MODEL_HOST_DIR} (host) <-> ${MODEL_LXC_DIR} (container) o
 echo "Access llama-server at http://192.168.1.11:80"
 echo "Host driver pinned: $NVIDIA_DRIVER_VERSION_SHORT (branch $DRIVER_BRANCH) CUDA $CUDA_MAJOR Volta V100 32GB sm70"
 echo "Verify inside LXC: nvidia-smi -L && nvidia-smi && /opt/llama.cpp/build/bin/llama-server --version && nvidia-smi dmon"
-echo "Note: Single OCuLink slot — stop 131 before starting 130: pct stop 131 && pct start 130"
+echo "Note: Single OCuLink slot — legacy 130/131 retired, workhorse is now 111: pct stop 131; pct stop 130"
