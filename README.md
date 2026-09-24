@@ -2,7 +2,7 @@
 
 Infrastructure-as-Code for the HLH shared AI inference engine (CUDA V100 Volta eGPU variant).
 Deploys a GPU-accelerated llama.cpp runtime as a Proxmox LXC container using the
-CUDA backend (550 + 12.4, sm70) on an OCuLink Tesla V100 32GB.
+CUDA backend (580 + 12.8, sm70) on an OCuLink Tesla V100 32GB (6.14 LTS kernel).
 
 ## Executive Summary
 
@@ -11,7 +11,7 @@ host `prox01` (192.168.1.10). It is a sibling of `hlh-ai-engine` (ROCm 890M) and
 `hlh-ai-engine-egpu-vulkan` (Vulkan RX480) - now refactored from `hlh-ai-engine-k80` (K80 dual Kepler) to single Volta V100.
 
 - LXC 131, hostname `hlh-ai-engine-v100`, IP `192.168.1.31` (gw 192.168.1.1)
-- CUDA backend via NVIDIA 550.163.01 + CUDA 12.4 on Tesla V100 GV100GL PG500-216 (32GB HBM2, cc 7.0 Volta) via OCuLink c5:00.0 (was dual GK210 2x12GB)
+- CUDA backend via NVIDIA 580.65.06 (R580 last for Volta) + CUDA 12.8 on Tesla V100 GV100GL PG500-216 (32GB HBM2, cc 7.0 Volta) via OCuLink c5:00.0 (was dual GK210 2x12GB)
 - Single GV100 at `c5:00.0` (10de:1df0 rev a1) via GPP `00:03.1` OCuLink x4 (currently 8GT/s x2), IOMMU 20, exposed as `nvidia0`
 - llama.cpp `GGML_CUDA=ON` `ARCH=70` `FA=ON` (Volta supports Flash Attention), native web UI on port 80
 - Model storage **same path host and CT** via bind mount: host `RaidZ1-6TB` ZFS dataset `RaidZ1-6TB/ai/models` at `/srv/ai/models` → LXC `/srv/ai/models` (`755`, `root` managed, homelab, `zfs xattr,noacl`)
@@ -22,11 +22,11 @@ host `prox01` (192.168.1.10). It is a sibling of `hlh-ai-engine` (ROCm 890M) and
 ## Repository Boundary
 
 **Owns:**
-- LXC lifecycle (create, configure, start) on Proxmox `prox01`
-- GPU passthrough for CUDA (`/dev/nvidia0`, `/dev/nvidiactl`, `/dev/nvidia-uvm`, `/dev/nvidia-uvm-tools`, `/dev/nvidia-modeset`) via `cgroup2 c 195:*` + `c 507:*` + `c 510/511:*` (dynamic UVM major)
-- Host `nvidia_uvm` persistence (`/etc/modules-load.d/nvidia.conf` + `nvidia-uvm-devices.service` Before `pve-guests.service`, dynamic major)
+- LXC lifecycle (create, configure, start) on Proxmox `prox01` (pinned `proxmox-kernel-6.14.11-9-pve` for R580)
+- GPU passthrough for CUDA (`/dev/nvidia0`, `/dev/nvidiactl`, `/dev/nvidia-uvm`, `/dev/nvidia-uvm-tools`, `/dev/nvidia-modeset`) via `cgroup2 c 195:*` + `c 508:*` (R580) + `c 507:*` + `c 510/511:*` (dynamic UVM major)
+- Host `nvidia_uvm` persistence (`/etc/modules-load.d/nvidia.conf` + `nvidia-uvm-devices.service` Before `pve-guests.service`, dynamic major `508` for 580)
 - Model storage bind-mount wiring (`--mp0 /srv/ai/models,mp=/srv/ai/models`)
-- In-container CUDA 12.4 toolkit (ubuntu2404 repo) + `libnvidia-compute-550`/`nvidia-utils-550` 550.163.01 + llama.cpp CUDA build (cc 7.0)
+- In-container CUDA 12.8 toolkit (ubuntu2404 repo) + `libnvidia-compute-580`/`nvidia-utils-580` 580.65.06 + llama.cpp CUDA build (cc 7.0)
 
 **Does not own:**
 - Proxmox host kernel pin (that is `iac-hlh` / `proxmox-boot-tool`)
@@ -64,7 +64,7 @@ nvidia-smi -L; nvidia-smi
 
 Two bash scripts only (no ansible/opentofu):
 
-1. **Provisioning**: `deploy-hlh-ai-engine-v100.sh` creates the privileged LXC, wires CUDA passthrough (`/dev/nvidia*` — single GV100), and pushes the configuration script. If host `nvidia` driver not loaded, it blacklists `nouveau`, ensures trixie non-free + CUDA debian13 repo, installs `nvidia-driver` (kernel-aware: 470 on 7.0.14, 550 on 6.5) via DKMS, and reboots. Last driver for Volta is R580 (580.65.06) with CUDA 12.8/12.9 - trixie stable currently has 550; set `NVIDIA_DRIVER_VERSION=580.65.06-0ubuntu1 DRIVER_BRANCH=580` to use 580 when packaged.
+1. **Provisioning**: `deploy-hlh-ai-engine-v100.sh` creates the privileged LXC, wires CUDA passthrough (`/dev/nvidia*` — single GV100), and pushes the configuration script. If host `nvidia` driver not loaded, it blacklists `nouveau`, ensures trixie non-free + CUDA debian13 repo, and installs `R580 Tesla 580.65.06` via `.run --dkms` (6.14 LTS kernel, Volta last) or `550` on `6.5` via DKMS. Last driver for Volta is R580 (580.65.06) with CUDA 12.8/12.9 - trixie stable has 550, 590+ drops Volta; use `580.65.06` Tesla .run on `6.14`.
 2. **Configuration**: `configure-hlh-ai-engine-v100.sh` - when run on host it pushes itself into the LXC via `pct exec`/`ssh` and re-runs with `--bootstrap-inside`; that flag runs the embedded bootstrap (CUDA toolkit + llama.cpp `sm70 FA ON` + `v100-switch-model.sh` generation). No separate inside file.
 
 ## Runtime Contract
@@ -73,12 +73,12 @@ Two bash scripts only (no ansible/opentofu):
 |------|-------|
 | API endpoint | `http://192.168.1.31:80` |
 | OpenAI-compatible base | `http://192.168.1.31:80/v1/` |
-| Proxmox host | `prox01` 192.168.1.10 (Debian 13 trixie, kernel 7.0.14-11-pve) |
+| Proxmox host | `prox01` 192.168.1.10 (Debian 13 trixie, kernel `6.14.11-9-pve` pinned, `R580` LTS) |
 | Model storage | `/srv/ai/models` host (RaidZ1-6TB) ↔ `/srv/ai/models` LXC (bind mount `mp0`, same path, 755 root) |
-| GPU device | `/dev/nvidia0` (GV100 c5:00.0) + `nvidiactl` + `nvidia-uvm`/`-uvm-tools` (dynamic 507/511) + `nvidia-modeset` (195:254) — `c 195:*` + `c 507:*` |
-| eGPU | Tesla V100 GV100GL 32GB cc 7.0 via OCuLink c5:00.0 (10de:1df0 rev a1) - single GPU via GPP 00:03.1 x4 (8GT/s x2 downgraded) |
-| Driver / CUDA | Host 550.163.01 + CUDA 12.4.1 (Volta last is R580 580.65.06 + CUDA 12.8/12.9); CT toolkit from ubuntu2404 repo + `nvidia-utils-550` 550.163.01 |
-| Llama.cpp | `GGML_CUDA=ON` `CMAKE_CUDA_ARCHITECTURES=70` `FA=ON` `FORCE_DMMV/MMQ=ON`, gcc-13 (CUDA 12.4 needs ≤13) |
+| GPU device | `/dev/nvidia0` (GV100 c5:00.0) + `nvidiactl` + `nvidia-uvm`/`-uvm-tools` (dynamic `508` for 580) + `nvidia-modeset` (195:254) — `c 195:*` + `c 508:*` |
+| eGPU | Tesla V100 GV100GL 32GB cc 7.0 via OCuLink c5:00.0 (10de:1df0 rev a1) - single GPU via GPP 00:03.1 x4 (8GT/s x2) |
+| Driver / CUDA | Host `580.65.06` `CUDA 13.0` (R580 last for Volta, CC 7.0); CT `CUDA 12.8` `libnvidia-compute-580`/`nvidia-utils-580` from `ubuntu2404` (12.8 final sm70) |
+| Llama.cpp | `GGML_CUDA=ON` `CMAKE_CUDA_ARCHITECTURES=70` `FA=ON` `FORCE_DMMV/MMQ=ON`, `gcc-13` (`CUDA 12.8` needs `≤13`) |
 | Default model | `Mellum2-12B-A2.5B-Thinking-Q3_K_M.gguf` (4.9GB on RaidZ1-6TB, 32K ctx q4_0) |
 | LXC | 131, 8192 MB RAM, 12 cores, 64G rootfs RaidZ1-6TB, `nesting=1,keyctl=1,fuse=1` |
 | Single slot | OCuLink c5:00.0 — LXC 130 (vulkan) and 131 (v100) cannot run together; deploy stops 130 |
@@ -100,10 +100,10 @@ hlh-ai-engine-v100/
 
 **CUDA only (Volta).** This variant is CUDA sm70:
 
-- llama.cpp built with `GGML_CUDA=ON`, `GGML_VULKAN=OFF`, `GGML_HIP=OFF`, `GGML_CUDA_FA_ALL_QUANTS=ON` (Volta supports FA), `CMAKE_CUDA_ARCHITECTURES=70`, `FORCE_DMMV/MMQ`
-- CUDA toolkit 12.4 from `https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/` (pinned `12.4.1`), `nvidia-utils-550`/`libnvidia-compute-550` `550.163.01-0ubuntu1` (reuses host 550 branch)
-- Host driver: `nvidia-driver=550.163.01-2` (trixie non-free) + `nvidia-modprobe -u -c 0` + `/etc/modules-load.d/nvidia.conf` (`nvidia`, `nvidia_uvm`, `nvidia_modeset`, `nvidia_drm`) + `nvidia-uvm-devices.service` with dynamic `UVM_MAJOR`
-- Last Volta driver is R580 (580.65.06) with CUDA 12.8/12.9 - when trixie gets 580, update `NVIDIA_DRIVER_VERSION` and `CUDA_MAJOR` to 12.8. Current pin 550 is stable for kernel 7.0.14-pve.
+- llama.cpp built with `GGML_CUDA=ON`, `GGML_VULKAN=OFF`, `GGML_HIP=OFF`, `GGML_CUDA_FA_ALL_QUANTS=ON` (Volta supports FA), `CMAKE_CUDA_ARCHITECTURES=70`, `FORCE_DMMV/MMQ`, `gcc-13`
+- CUDA toolkit `12.8` from `https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/` (pinned `12.8.0-1`), `nvidia-utils-580`/`libnvidia-compute-580` `580.65.06` (R580 last for Volta, `gcc-13` compatible, no `libtinfo5` jammy hack)
+- Host driver: `Tesla R580 580.65.06` via `.run --dkms` on `proxmox-kernel-6.14.11-9-pve` (LTS, validated for `V100`); `nvidia-modprobe -u -c 0` + `/etc/modules-load.d/nvidia.conf` (`nvidia nvidia_uvm nvidia_modeset nvidia_drm`) + `nvidia-uvm-devices.service` `Before pve-guests` dynamic `UVM_MAJOR=508` (580) vs `507` (470)
+- `7.0.14-11-pve`/`6.17` breaks `550/580 closed` `__vm_flags`/`proc_ops`/`dma_is_direct` - stay on `6.14` LTS until NVIDIA rebases. `6.5.13-5-pve` also broken on this board (`No route`). OCuLink `c5:00.0` `00:03.1` `IOMMU 20` single `GV100`.
 - OCuLink is PCIe — NOT hot-pluggable while LXC is running; V100 single GPU IOMMU 20 at `00:03.1` GPP
 
 ## llama.cpp Tuning Reference

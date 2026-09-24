@@ -5,6 +5,15 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0-v100] - 2026-09-24
+
+### Fixed
+
+- **Host kernel pin**: `proxmox-kernel-6.14.11-9-pve` pinned LTS for `R580` (Volta). `7.0.14-11/17-pve` (`6.17`) and `6.5.13-5-pve` break `550/580 closed` (`__vm_flags`/`proc_ops`/`dma_is_direct`/`in_irq`) and `6.5` has `No route` on this board (`2086-071E`). `6.14` validated with `Tesla 580.65.06` `CUDA 13.0` host + `12.8` CT.
+- **Driver**: `R580 Tesla 580.65.06` via `.run --dkms --install-libglvnd` on `6.14` (last for `Volta sm70`, `CUDA 12.8` final). `580.65.06` not in `trixie non-free`/`CUDA repo` (which has `590+` dropping Volta) - deploy now `wget` Tesla `.run` for `580` branch, `apt` for `550`. `UVM` major `508` (580) vs `507` (470) added to `lxc.cgroup2`.
+- **CT CUDA**: `cuda-toolkit-12-8` + `libnvidia-compute-580`/`nvidia-utils-580` from `ubuntu2404` (was `12.4/550`). `11.8/470` path kept for legacy `6.5` fallback, `gcc-13` for `12.8` (no jammy `libtinfo5`), `LD_LIBRARY_PATH` + `libnvidia-ml.so.580.65.06` symlink, `cgroup2` `c 508:*` added.
+- **Build fix**: `gcc-11` auto-installed for `CUDA 11.8` legacy path; `CUDA 12.8` uses `gcc-13` native, `update-alternatives` `gcc-11` handling retained.
+
 ## [2.0.0-v100] - 2026-09-23
 
 ### Changed

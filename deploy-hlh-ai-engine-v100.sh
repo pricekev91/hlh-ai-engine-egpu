@@ -29,18 +29,20 @@ EOF
 
 # --- PINNED VERSIONS (V100 Volta cc 7.0) ---
 # Last stable for Volta: R580 (580.65.06) + CUDA 12.8/12.9 is final sm_70 support.
-# NOTE 2026-09-23: Proxmox kernel 7.0.14-11-pve breaks 550.163.01 DKMS (__vm_flags / VMA-lock / in_irq).
-# 550 builds on 6.5.13-5-pve but not 7.0 (tested). 470.256.02 (runfile) still builds on 7.0 and drives V100 (CUDA 11.4).
-# Therefore default host pin stays 470 for kernel 7.0 until 580 packaged for trixie or patch. LXC uses CUDA 11.8 (matches 470).
-# For kernel 6.5 or when 580 available: export NVIDIA_DRIVER_VERSION="550.163.01-2" DRIVER_BRANCH="550" CUDA_VERSION="12.4.1"
-# Or for 580: export NVIDIA_DRIVER_VERSION="580.65.06-1" DRIVER_BRANCH="580" CUDA_VERSION="12.8.1"
-KERNEL_MAJ=$(uname -r | cut -d. -f1)
-if [[ "$KERNEL_MAJ" -ge 7 ]]; then
-  DEFAULT_DRIVER="470.256.02-1~deb11u2"
-  DEFAULT_SHORT="470.256.02"
-  DEFAULT_CUDA="11.8.0-1"
-  DEFAULT_MAJOR="11.8"
-  DEFAULT_BRANCH="470"
+# NOTE 2026-09-24: Proxmox kernel 7.0.14-11-pve/17-pve (6.17) breaks 550/580 closed DKMS
+# (__vm_flags / VMA-lock / proc_ops / in_irq / dma_is_direct). 6.14.11-9-pve is the
+# validated LTS for Volta with R580 580.65.06 (CUDA 13.0 host, LXC 12.8).
+# Host is now pinned to proxmox-kernel-6.14.11-9-pve + 580.65.06 via .run --dkms.
+# Fallback: 6.5.13-5-pve + 550.163.01 + CUDA 12.4 still scripted.
+# Override via NVIDIA_DRIVER_VERSION env.
+KERNEL_VER=$(uname -r)
+KERNEL_MAJ=$(echo "$KERNEL_VER" | cut -d. -f1)
+if [[ "$KERNEL_VER" == *6.14* ]] || [[ "$KERNEL_MAJ" -ge 7 ]]; then
+  DEFAULT_DRIVER="580.65.06"
+  DEFAULT_SHORT="580.65.06"
+  DEFAULT_CUDA="12.8.0-1"
+  DEFAULT_MAJOR="12.8"
+  DEFAULT_BRANCH="580"
 else
   DEFAULT_DRIVER="550.163.01-2"
   DEFAULT_SHORT="550.163.01"
@@ -98,9 +100,9 @@ get_iommu_for() { readlink "/sys/bus/pci/devices/$1/iommu_group" 2>/dev/null || 
 
 # --- 0/6 Host driver (pinned) ---
 if [[ "$SKIP_HOST_DRIVER" == "false" ]]; then
-	echo "[0/6] Host NVIDIA driver check (pinned: nvidia-driver $NVIDIA_DRIVER_VERSION_SHORT Volta GV100 sm70, CUDA $CUDA_MAJOR)..."
+	echo "[0/6] Host NVIDIA driver check (pinned: nvidia-driver $NVIDIA_DRIVER_VERSION_SHORT Volta GV100 sm70, CUDA $CUDA_MAJOR, kernel $KERNEL_VER)..."
 	if lsmod | grep "nvidia" >/dev/null && modinfo nvidia 2>/dev/null | grep "$DRIVER_BRANCH" >/dev/null; then
-		echo "  Host driver already loaded: $(modinfo nvidia 2>/dev/null | grep ^version: | head -1)"
+		echo "  Host driver already loaded: $(modinfo nvidia 2>/dev/null | grep ^version: | head -1) on $KERNEL_VER"
 		set +o pipefail; nvidia-smi 2>&1 | head -10 || true; set -o pipefail
 		# Ensure nvidia_uvm persists across reboot
 		if [ ! -f /etc/modules-load.d/nvidia.conf ]; then
@@ -160,16 +162,36 @@ BLK
 			echo "deb [signed-by=/usr/share/keyrings/nvidia-cuda.gpg] https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64 /" > /etc/apt/sources.list.d/cuda-debian13.list
 		fi
 		apt update
-		echo "  - Installing nvidia-driver=$NVIDIA_DRIVER_VERSION (DKMS) - Volta GV100 cc 7.0"
-		# Prefer exact pin, fallback to any 550/580 available
-		apt install -y --no-install-recommends nvidia-driver=${NVIDIA_DRIVER_VERSION} nvidia-settings 2>&1 | tail -n 30 || \
-		apt install -y --no-install-recommends nvidia-driver nvidia-settings 2>&1 | tail -n 30
-		echo "  - Updating initramfs and reboot required"
-		update-initramfs -u
-		echo "  Host driver stage complete. Rebooting prox01 in 5s (Ctrl+C to abort)..."
-		sleep 5
-		reboot
-		exit 0
+		if [[ "$DRIVER_BRANCH" == "580" ]]; then
+			echo "  - Installing R580 Tesla 580.65.06 via .run --dkms (580 not in trixie non-free, CUDA repo has 590+ which drops Volta)"
+			if [ ! -f /tmp/NVIDIA-Linux-x86_64-580.65.06.run ]; then
+				echo "  Downloading Tesla 580.65.06..."
+				wget -q --show-progress https://us.download.nvidia.com/tesla/580.65.06/NVIDIA-Linux-x86_64-580.65.06.run -O /tmp/NVIDIA-Linux-x86_64-580.65.06.run || {
+					echo "ERROR: Failed to download 580.65.06 .run" >&2; exit 1; }
+			fi
+			chmod +x /tmp/NVIDIA-Linux-x86_64-580.65.06.run
+			echo "  Running NVIDIA-Linux-x86_64-580.65.06.run --dkms --silent --install-libglvnd..."
+			/tmp/NVIDIA-Linux-x86_64-580.65.06.run --dkms --silent --install-libglvnd 2>&1 | tail -n 30
+			echo "  Verifying 580 install..."
+			modinfo nvidia 2>&1 | grep ^version: | head -1 || true
+			nvidia-smi 2>&1 | head -10 || true
+			if ! modinfo nvidia 2>/dev/null | grep -q "580"; then echo "ERROR: 580 driver not loaded after .run" >&2; exit 1; fi
+			echo "  - Updating initramfs (580 DKMS already handled)"
+			update-initramfs -u 2>&1 | tail -n 5 || true
+			echo "  Host driver 580.65.06 ready on $KERNEL_VER - no reboot required if nvidia-smi OK, else reboot"
+			# No auto-reboot for 580 --dkms; user can reboot if needed
+		else
+			echo "  - Installing nvidia-driver=$NVIDIA_DRIVER_VERSION (DKMS) - Volta GV100 cc 7.0"
+			# Prefer exact pin, fallback to any 550 available
+			apt install -y --no-install-recommends nvidia-driver=${NVIDIA_DRIVER_VERSION} nvidia-settings 2>&1 | tail -n 30 || \
+			apt install -y --no-install-recommends nvidia-driver nvidia-settings 2>&1 | tail -n 30
+			echo "  - Updating initramfs and reboot required"
+			update-initramfs -u
+			echo "  Host driver stage complete. Rebooting prox01 in 5s (Ctrl+C to abort)..."
+			sleep 5
+			reboot
+			exit 0
+		fi
 	fi
 else
 	echo "[0/6] Skipping host driver install (--skip-host-driver)"
@@ -228,11 +250,13 @@ echo "[3/6] Adding V100 CUDA passthrough (single GV100 32GB + UVM)..."
 # If host uses dynamic UVM major (507/511), covers both. nvidia-modeset is 195:254.
 cat >> "/etc/pve/lxc/${LXC_ID}.conf" <<'LXCCONF'
 
-# V100 Tesla GV100 32GB (cc 7.0) — CUDA + driver 550/580 pinned, single GPU
+# V100 Tesla GV100 32GB (cc 7.0) — CUDA + driver 580 pinned (R580 last for Volta), single GPU
 # c5:00.0 (10de:1df0) via OCuLink 00:03.1 GPP x4; IOMMU group 20
 # Expose single chip as nvidia0 plus control nodes (CUDA)
+# UVM major is dynamic: 507 (470) / 508 (580) / 511 (caps) - allow all
 lxc.cgroup2.devices.allow: c 195:* rwm
 lxc.cgroup2.devices.allow: c 507:* rwm
+lxc.cgroup2.devices.allow: c 508:* rwm
 lxc.cgroup2.devices.allow: c 510:* rwm
 lxc.cgroup2.devices.allow: c 511:* rwm
 lxc.mount.entry: /dev/nvidia0 dev/nvidia0 none bind,optional,create=file

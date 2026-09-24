@@ -57,21 +57,29 @@ if $BOOTSTRAP_INSIDE; then
 set -euo pipefail
 
 # --- PINNED VERSIONS (V100 Volta cc 7.0) ---
-# Host driver: 470.256.02 for kernel 7.0 (only buildable), 550.163.01 for kernel 6.5. R580 last for Volta.
-# LXC CUDA must match host driver: 470->11.8, 550->12.4, 580->12.8. Auto-detect via host nvidia-smi or uname.
-KERNEL_MAJ=$(uname -r | cut -d. -f1)
-if [[ "$KERNEL_MAJ" -ge 7 ]]; then
-  NVIDIA_DRIVER_VERSION="470.256.02"
-  CUDA_VERSION="11.8.0-1"
-  CUDA_MAJOR="11.8"
-  CUDA_REPO="ubuntu2204"
+# Host driver: R580 580.65.06 on 6.14.11-9-pve (validated LTS for Volta), 550 on 6.5.
+# 470 only for legacy 6.5/7.0 where 580 not available, but UVM broken on >=6.15.
+# LXC CUDA must match host driver: 470->11.8, 550->12.4, 580->12.8. Auto-detect via uname.
+KERNEL_VER=$(uname -r)
+KERNEL_MAJ=$(echo "$KERNEL_VER" | cut -d. -f1)
+if [[ "$KERNEL_VER" == *6.14* ]] || [[ "$KERNEL_MAJ" -ge 7 ]]; then
+  NVIDIA_DRIVER_VERSION="580.65.06"
+  CUDA_VERSION="12.8.0-1"
+  CUDA_MAJOR="12.8"
+  CUDA_REPO="ubuntu2404"
+elif [[ "$KERNEL_MAJ" -ge 6 ]]; then
+  # 6.5 fallback
+  NVIDIA_DRIVER_VERSION="550.163.01"
+  CUDA_VERSION="12.4.1"
+  CUDA_MAJOR="12.4"
+  CUDA_REPO="ubuntu2404"
 else
   NVIDIA_DRIVER_VERSION="550.163.01"
   CUDA_VERSION="12.4.1"
   CUDA_MAJOR="12.4"
   CUDA_REPO="ubuntu2404"
 fi
-# R580 (580.65.06) is last driver supporting Volta - upgrade both when Debian packages 580.
+# R580 (580.65.06) is last driver supporting Volta - CUDA 12.8 is final sm70 offline compile.
 
 # --- CONFIGURABLE ---
 MODEL_DIR="/srv/ai/models"
@@ -141,6 +149,18 @@ if [[ "$CUDA_MAJOR" == "11.8" ]]; then
   apt-get install -y --no-install-recommends nvidia-utils-470=${NVIDIA_DRIVER_VERSION}-0ubuntu0.24.04.1 2>&1 | tail -n 20 || apt-get install -y --no-install-recommends nvidia-utils-470 2>&1 | tail -n 20 || true
   apt-mark hold libnvidia-compute-470 nvidia-utils-470 cuda-toolkit-11-8 2>&1 | head -n 5 || true
   DRIVER_PKG="470"
+elif [[ "$CUDA_MAJOR" == "12.8" ]]; then
+  echo "  Installing CUDA toolkit $CUDA_MAJOR + nvidia userspace $NVIDIA_DRIVER_VERSION (580 branch)..."
+  apt-get install -y --allow-downgrades cuda-toolkit-12-8 2>&1 | tail -n 30 || apt-get install -y cuda-toolkit 2>&1 | tail -n 20 || true
+  apt-get install -y --allow-downgrades libnvidia-compute-580=${NVIDIA_DRIVER_VERSION}-0ubuntu1 2>&1 | tail -n 20 || apt-get install -y --allow-downgrades libnvidia-compute-580 2>&1 | tail -n 20 || true
+  apt-get install -y --no-install-recommends nvidia-utils-580=${NVIDIA_DRIVER_VERSION}-0ubuntu1 2>&1 | tail -n 20 || apt-get install -y --no-install-recommends nvidia-utils-580 2>&1 | tail -n 20 || true
+  # Fallback if 580 not in repo (Tesla .run host) - try generic 580
+  if ! dpkg -l | grep -q libnvidia-compute-580; then
+    echo "  WARNING: libnvidia-compute-580 not in repo, trying nvidia-utils-580 generic"
+    apt-get install -y --allow-downgrades libnvidia-compute-580 nvidia-utils-580 2>&1 | tail -n 20 || true
+  fi
+  apt-mark hold libnvidia-compute-580 nvidia-utils-580 cuda-toolkit-12-8 2>&1 | head -n 5 || true
+  DRIVER_PKG="580"
 else
   echo "  Installing CUDA toolkit $CUDA_MAJOR + nvidia userspace $NVIDIA_DRIVER_VERSION..."
   apt-get install -y --allow-downgrades cuda-toolkit-12-4 2>&1 | tail -n 30 || apt-get install -y cuda-toolkit 2>&1 | tail -n 20 || true
@@ -162,6 +182,10 @@ if [ -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.${NVIDIA_DRIVER_VERSION} ]; th
   ln -sf libnvidia-ml.so.${NVIDIA_DRIVER_VERSION} /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 2>&1 | head -n 5 || true
   ln -sf libnvidia-ml.so.${NVIDIA_DRIVER_VERSION} /usr/lib/x86_64-linux-gnu/libnvidia-ml.so 2>&1 | head -n 5 || true
   ldconfig 2>&1 | head -n 5 || true
+elif [ -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.580.65.06 ]; then
+  ln -sf libnvidia-ml.so.580.65.06 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 2>&1 | head -n 5 || true
+  ln -sf libnvidia-ml.so.580.65.06 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so 2>&1 | head -n 5 || true
+  ldconfig 2>&1 | head -n 5 || true
 elif [ -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.550.163.01 ]; then
   ln -sf libnvidia-ml.so.550.163.01 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 2>&1 | head -n 5 || true
   ldconfig 2>&1 | head -n 5 || true
@@ -175,6 +199,7 @@ export PATH=/usr/local/cuda/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
 echo 'export PATH=/usr/local/cuda/bin:$PATH' > /etc/profile.d/cuda.sh
 echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH' >> /etc/profile.d/cuda.sh
+if [ -f /usr/local/cuda-12.8/targets/x86_64-linux/lib/libcudart.so.12 ]; then ln -sf /usr/local/cuda-12.8 /usr/local/cuda 2>/dev/null || true; fi
 if [ -f /usr/local/cuda-12.4/targets/x86_64-linux/lib/libcudart.so.12 ]; then ln -sf /usr/local/cuda-12.4 /usr/local/cuda 2>/dev/null || true; fi
 if [ -f /usr/local/cuda-11.8/targets/x86_64-linux/lib/libcudart.so.11.0 ]; then ln -sf /usr/local/cuda-11.8 /usr/local/cuda 2>/dev/null || true; fi
 ldconfig
