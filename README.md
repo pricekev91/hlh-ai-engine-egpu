@@ -79,7 +79,7 @@ Two bash scripts only (no ansible/opentofu):
 | eGPU | Tesla V100 GV100GL 32GB cc 7.0 via OCuLink c5:00.0 (10de:1df0 rev a1) - single GPU via GPP 00:03.1 x4 (8GT/s x2) |
 | Driver / CUDA | Host `580.65.06` `CUDA 13.0` (R580 last for Volta, CC 7.0); CT `CUDA 12.8` `libnvidia-compute-580`/`nvidia-utils-580` from `ubuntu2404` (12.8 final sm70) |
 | Llama.cpp | `GGML_CUDA=ON` `CMAKE_CUDA_ARCHITECTURES=70` `FA=ON` `FORCE_DMMV/MMQ=ON`, `gcc-13` (`CUDA 12.8` needs `≤13`) |
-| Default model | `Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf` (22.6GB on RaidZ1-6TB, 32K ctx q4_0 MTP) |
+| Default model | `Qwen3.8-27B-MTP-Q4_K_M.gguf` (17GB on RaidZ1-6TB, 128K ctx q4_0 MTP FA ON) |
 | LXC | 131, 8192 MB RAM, 12 cores, 64G rootfs RaidZ1-6TB, `nesting=1,keyctl=1,fuse=1` |
 | Single slot | OCuLink c5:00.0 — LXC 130 (vulkan) and 131 (v100) cannot run together; deploy stops 130 |
 

@@ -83,7 +83,7 @@ fi
 
 # --- CONFIGURABLE ---
 MODEL_DIR="/srv/ai/models"
-DEFAULT_MODEL_FILE="Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf"
+DEFAULT_MODEL_FILE="Qwen3.8-27B-MTP-Q4_K_M.gguf"
 LLAMA_CPP_REPO="https://github.com/ggerganov/llama.cpp.git"
 LLAMA_CPP_DIR="/opt/llama.cpp"
 SERVICE_NAME="ai-engine"
@@ -294,9 +294,9 @@ if [ -f "${MODEL_DIR}/${DEFAULT_MODEL_FILE}" ]; then
   echo "Default model already present on shared mount: $ACTIVE_MODEL_FILE"
 else
   PREFERRED_MODELS=(
+    "Qwen3.8-27B-MTP-Q4_K_M.gguf"
     "Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf"
     "Mellum2-12B-A2.5B-Thinking-Q3_K_M.gguf"
-    "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
   )
   for MODEL_CANDIDATE in "${PREFERRED_MODELS[@]}"; do
     if [ -f "${MODEL_DIR}/${MODEL_CANDIDATE}" ]; then
@@ -324,7 +324,50 @@ if [ ! -f "${MODEL_DIR}/${ACTIVE_MODEL_FILE}" ]; then
 fi
 
 # --- 4. SYSTEMD SERVICE ---
+# Default for Qwen3.8-27B-MTP: 128K q4 FA ON MTP draft 3 (17106773984 17GB, 128K ~16GB KV q4_0)
+# MTP enabled, 128K as requested (tight on 32GB - may spill to ~33GB)
+if [[ "$ACTIVE_MODEL_FILE" == *MTP* ]]; then
+  ACTIVE_CTX="131072"
+  ACTIVE_SPEC="--spec-type draft-mtp --spec-draft-n-max 3"
+else
+  ACTIVE_CTX="32768"
+  ACTIVE_SPEC=""
+fi
+# Force 128K for Qwen3.8-27B-MTP as requested
+if [[ "$ACTIVE_MODEL_FILE" == "Qwen3.8-27B-MTP-Q4_K_M.gguf" ]]; then
+  ACTIVE_CTX="131072"
+  ACTIVE_SPEC="--spec-type draft-mtp --spec-draft-n-max 3"
+fi
 echo "[4/7] Creating systemd service for llama-server (CUDA V100)..."
+if [ -n "$ACTIVE_SPEC" ]; then
+cat > "$SYSTEMD_SERVICE" << UNIT
+[Unit]
+Description=llama.cpp AI Engine (llama-server) - CUDA V100 32GB on port 80 - driver $NVIDIA_DRIVER_VERSION sm70 FA ON MTP 128K q4
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${LLAMA_CPP_DIR}/build/bin
+Environment=CUDA_VISIBLE_DEVICES=0
+ExecStart=${LLAMA_CPP_DIR}/build/bin/llama-server \\
+  --model ${MODEL_DIR}/${ACTIVE_MODEL_FILE} \\
+  --host 0.0.0.0 --port 80 \\
+  --ctx-size ${ACTIVE_CTX} \\
+  -ngl 99 \\
+  --batch-size 512 \\
+  --flash-attn on \\
+  --cache-type-k q4_0 \\
+  --cache-type-v q4_0 \\
+  ${ACTIVE_SPEC} \\
+  --parallel 1
+Restart=on-failure
+RestartSec=10
+User=root
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+else
 cat > "$SYSTEMD_SERVICE" << UNIT
 [Unit]
 Description=llama.cpp AI Engine (llama-server) - CUDA V100 32GB on port 80 - driver $NVIDIA_DRIVER_VERSION sm70 FA ON
@@ -337,7 +380,7 @@ Environment=CUDA_VISIBLE_DEVICES=0
 ExecStart=${LLAMA_CPP_DIR}/build/bin/llama-server \\
   --model ${MODEL_DIR}/${ACTIVE_MODEL_FILE} \\
   --host 0.0.0.0 --port 80 \\
-  --ctx-size 32768 \\
+  --ctx-size ${ACTIVE_CTX} \\
   -ngl 99 \\
   --batch-size 512 \\
   --flash-attn on \\
@@ -351,6 +394,7 @@ User=root
 [Install]
 WantedBy=multi-user.target
 UNIT
+fi
 
 # --- 5. MODEL SWITCH SCRIPT (V100 GV100 single 32GB) ---
 echo "[5/7] Creating model switcher: $SWITCH_SCRIPT (Tesla V100 32GB CUDA) -> $SHARED_SWITCH_SCRIPT..."
