@@ -5,6 +5,12 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.2-egpu] - 2026-09-25
+
+### Fixed
+
+- **Greenfield/Nuke codified: 580 branch now pins full 5-package set via `apt-cache madison` (no unpinned fallback).** Previous `1.0.1` → `2.3.1` only unheld/held 2 packages (`libnvidia-compute-580` + `nvidia-utils-580`); the other three (`libnvidia-cfg1/decode/gpucomp-580`) could stay at `580.178.04` and `apt-get remove nvidia-persistenced` failed while held (`615.71.09` remained). Now resolves `RESOLVED_US` for `580.65.06-0ubuntu1` (handles suffix rotation) and installs the full set with `--allow-downgrades --no-install-recommends`; unholds all 5 before `nvidia-persistenced` removal and re-holds afterwards. Matches `hlh-ai-engine-vllm` `0.6.1` hardening. Keeps `2.3.1` FATAL gate (`libnvidia-compute-580 != host driver`).
+
 ## [2.3.1-egpu] - 2026-09-24
 
 ### Fixed

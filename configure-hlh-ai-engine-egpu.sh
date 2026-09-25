@@ -48,7 +48,7 @@ done
 if $BOOTSTRAP_INSIDE; then
 	# --- BEGIN BOOTSTRAP LOGIC (formerly configure-ai-engine-inside-lxc.sh) ---
 # configure-ai-engine-inside-lxc.sh
-# Version: 1.0.1-egpu-cuda (fix: stale CUDA list without key broke every apt-get update; curl/gpg missing on minimal template; jammy pin deleted after creation)
+# Version: 1.0.2-egpu-cuda (fix: harden 580 userspace pin to exact host driver via madison, full 5-package set; greenfield VRAM co-tenancy handled by vllm deploy)
 # Description: Bootstrap llama.cpp AI engine on Ubuntu 24.04 LXC with CUDA for Tesla V100 (GV100 32GB cc 7.0) via OCuLink
 # Target GPU: NVIDIA Tesla V100 GV100GL PG500-216 (32GB HBM2) single via OCuLink c5:00.0 on Proxmox 9.x privileged LXC
 # Backend: GGML_CUDA=ON arch 70, FA ON, CUDA 12.4 + driver 550.163.01 (last stable for Volta in Debian trixie; R580 last overall)
@@ -204,22 +204,37 @@ if [[ "$CUDA_MAJOR" == "11.8" ]]; then
 elif [[ "$CUDA_MAJOR" == "12.8" ]]; then
   echo "  Installing CUDA toolkit $CUDA_MAJOR + nvidia userspace $NVIDIA_DRIVER_VERSION (580 branch)..."
   apt-get install -y --allow-downgrades cuda-toolkit-12-8 2>&1 | tail -n 30 || apt-get install -y cuda-toolkit 2>&1 | tail -n 20 || true
-  apt-mark unhold libnvidia-compute-580 nvidia-utils-580 2>/dev/null || true
-  apt-get install -y --allow-downgrades libnvidia-compute-580=${NVIDIA_DRIVER_VERSION}-0ubuntu1 2>&1 | tail -n 20 || apt-get install -y --allow-downgrades libnvidia-compute-580 2>&1 | tail -n 20 || true
-  apt-get install -y --no-install-recommends nvidia-utils-580=${NVIDIA_DRIVER_VERSION}-0ubuntu1 2>&1 | tail -n 20 || apt-get install -y --no-install-recommends nvidia-utils-580 2>&1 | tail -n 20 || true
-  # Fallback if 580 not in repo (Tesla .run host) - try generic 580
-  if ! dpkg -l | grep -q libnvidia-compute-580; then
-    echo "  WARNING: libnvidia-compute-580 not in repo, trying nvidia-utils-580 generic"
-    apt-get install -y --allow-downgrades libnvidia-compute-580 nvidia-utils-580 2>&1 | tail -n 20 || true
+  # Unhold full 5-package set from any prior (possibly mismatched 580.178) run
+  apt-mark unhold libnvidia-compute-580 nvidia-utils-580 libnvidia-cfg1-580 libnvidia-decode-580 libnvidia-gpucomp-580 2>/dev/null || true
+  # Resolve exact version string for host driver (handles revision suffix 580.65.06-0ubuntu1 vs 580.178.04-1ubuntu1)
+  RESOLVED_US="$(apt-cache madison libnvidia-compute-580 2>/dev/null | awk -F'\\|' -v v="${NVIDIA_DRIVER_VERSION}" '{gsub(/[ \t]/,"",$2); if (index($2, v "-")==1) {print $2; exit}}' || true)"
+  if [[ -n "$RESOLVED_US" ]]; then
+    echo "  Installing userspace ${RESOLVED_US} (exact match for host driver ${NVIDIA_DRIVER_VERSION})..."
+    if ! apt-get install -y --allow-downgrades --no-install-recommends \
+        libnvidia-compute-580=${RESOLVED_US} libnvidia-cfg1-580=${RESOLVED_US} libnvidia-decode-580=${RESOLVED_US} libnvidia-gpucomp-580=${RESOLVED_US} nvidia-utils-580=${RESOLVED_US} 2>&1 | tail -n 30; then
+      echo "  FATAL: pinned userspace ${RESOLVED_US} install failed (host driver ${NVIDIA_DRIVER_VERSION})." >&2
+      echo "         Do NOT fall back to unpinned: NVML needs exact match." >&2
+      exit 1
+    fi
+  else
+    echo "  FATAL: no ${NVIDIA_DRIVER_VERSION} userspace in CUDA ubuntu2404 repo (host driver ${NVIDIA_DRIVER_VERSION})." >&2
+    echo "  Available:" >&2; apt-cache madison libnvidia-compute-580 2>/dev/null | awk -F'\\|' '{gsub(/ /,"",$2); print "   ", $2}' | head -10 >&2 || true
+    echo "  If repo rotated, upgrade host driver to current 580 tip via hlh-ai-engine-egpu and re-run." >&2
+    exit 1
   fi
-  apt-mark hold libnvidia-compute-580 nvidia-utils-580 cuda-toolkit-12-8 2>&1 | head -n 5 || true
-  # NVML requires userspace to EXACTLY match the host kernel driver. NVIDIA rotates
-  # 580-branch point releases, so an unpinned fallback can install a mismatched
-  # version and silently break the GPU (Driver/library version mismatch).
+  apt-mark hold libnvidia-compute-580 nvidia-utils-580 libnvidia-cfg1-580 libnvidia-decode-580 libnvidia-gpucomp-580 cuda-toolkit-12-8 2>&1 | head -n 8 || true
+  # nvidia-persistenced is not needed in LXC and blocks downgrades while held; remove if present
+  if dpkg -s nvidia-persistenced >/dev/null 2>&1; then
+    systemctl disable --now nvidia-persistenced 2>/dev/null || true
+    apt-mark unhold libnvidia-compute-580 nvidia-utils-580 libnvidia-cfg1-580 libnvidia-decode-580 libnvidia-gpucomp-580 2>/dev/null || true
+    apt-get remove -y nvidia-persistenced 2>&1 | tail -n 5 || true
+    apt-mark hold libnvidia-compute-580 nvidia-utils-580 libnvidia-cfg1-580 libnvidia-decode-580 libnvidia-gpucomp-580 2>/dev/null || true
+  fi
+  # NVML requires userspace to EXACTLY match the host kernel driver.
   _installed_580="$(dpkg-query -W -f='${Version}' libnvidia-compute-580 2>/dev/null || true)"
   if [[ -n "$_installed_580" && "$_installed_580" != "${NVIDIA_DRIVER_VERSION}-"* ]]; then
     echo "  FATAL: libnvidia-compute-580 ${_installed_580} != host driver ${NVIDIA_DRIVER_VERSION} (NVML needs exact match)." >&2
-    echo "         Fix: apt-mark unhold libnvidia-compute-580 nvidia-utils-580 && re-run, or upgrade the host driver to the current 580 tip." >&2
+    echo "         Fix: apt-mark unhold libnvidia-compute-580 nvidia-utils-580 libnvidia-cfg1-580 libnvidia-decode-580 libnvidia-gpucomp-580 && re-run" >&2
     exit 1
   fi
   DRIVER_PKG="580"
