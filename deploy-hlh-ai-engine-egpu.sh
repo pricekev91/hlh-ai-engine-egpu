@@ -11,12 +11,12 @@ Usage:
 
 V100 eGPU path (Tesla V100 GV100GL 32GB via OCuLink) - CUDA:
 	1) Verify/install NVIDIA 550/580 on Proxmox host (pinned, Volta GV100 cc 7.0)
-	2) Create privileged LXC 111 (hlh-ai-engine-egpu) at 192.168.1.11
+	2) Create privileged LXC 120 (hlh-ai-engine-egpu) at 192.168.1.20
 	3) Add cgroup + /dev/nvidia* bind-mounts for single GV100 (c5:00.0)
 	4) Start container + push/run CUDA bootstrap (GGML_CUDA=ON arch 70, FA ON)
 
 NOTES:
-	- Single OCuLink slot: LXC 111 only.
+	- Single OCuLink slot: LXC 120 only.
 	- V100 is Volta (cc 7.0) - last driver R580 (580.65.06) is last supporting Volta.
 	  Debian trixie stable currently packages 550.163.01 (supports CUDA 12.4).
 	  Script pins host to 550.163.01-2 (trixie non-free) + LXC CUDA 12.4 from ubuntu2404.
@@ -55,7 +55,7 @@ CUDA_VERSION="${CUDA_VERSION:-$DEFAULT_CUDA}"
 CUDA_MAJOR="${CUDA_MAJOR:-$DEFAULT_MAJOR}"
 DRIVER_BRANCH="${DRIVER_BRANCH:-$DEFAULT_BRANCH}"
 
-LXC_ID=111
+LXC_ID=120
 LXC_NAME="hlh-ai-engine-egpu"
 LXC_HOSTNAME="hlh-ai-engine-egpu"
 LXC_IMAGE="local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
@@ -65,7 +65,7 @@ MODEL_LXC_DIR="/srv/ai/models"
 LXC_ROOTFS_SIZE="64"
 LXC_MEMORY="24576"
 LXC_CORES="12"
-LXC_IP_CONFIG="192.168.1.11/24"
+LXC_IP_CONFIG="192.168.1.20/24"
 LXC_GATEWAY="192.168.1.1"
 
 SKIP_HOST_DRIVER=false
@@ -272,6 +272,6 @@ pct exec "${LXC_ID}" -- curl -fsS -m 5 http://127.0.0.1:80/health >/dev/null 2>&
 
 echo "[6/6] Deployment complete. LXC ${LXC_ID} (${LXC_NAME}) is running."
 echo "Model storage: ${MODEL_HOST_DIR} (host) <-> ${MODEL_LXC_DIR} (container) on ${POOL} (755, root managed)"
-echo "Access llama-server at http://192.168.1.11:80"
+echo "Access llama-server at http://192.168.1.20:80"
 echo "Host driver pinned: $NVIDIA_DRIVER_VERSION_SHORT (branch $DRIVER_BRANCH) CUDA $CUDA_MAJOR Volta V100 32GB sm70"
 echo "Verify inside LXC: nvidia-smi -L && nvidia-smi && /opt/llama.cpp/build/bin/llama-server --version && nvidia-smi dmon"

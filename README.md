@@ -10,12 +10,12 @@ This repository deploys and configures the **engine-egpu** LXC on the HLH Proxmo
 host `prox01` (192.168.1.10). It is a sibling of `hlh-ai-engine` (ROCm 890M) and
 `hlh-ai-engine-egpu-vulkan` (Vulkan RX480) - now refactored from `hlh-ai-engine-k80` (K80 dual Kepler) to single Volta V100.
 
-- LXC 111, hostname `hlh-ai-engine-egpu`, IP `192.168.1.11` (gw 192.168.1.1)
+- LXC 120, hostname `hlh-ai-engine-egpu`, IP `192.168.1.20` (gw 192.168.1.1)
 - CUDA backend via NVIDIA 580.65.06 (R580 last for Volta) + CUDA 12.8 on Tesla V100 GV100GL PG500-216 (32GB HBM2, cc 7.0 Volta) via OCuLink c5:00.0 (was dual GK210 2x12GB)
 - Single GV100 at `c5:00.0` (10de:1df0 rev a1) via GPP `00:03.1` OCuLink x4 (currently 8GT/s x2), IOMMU 20, exposed as `nvidia0`
 - llama.cpp `GGML_CUDA=ON` `ARCH=70` `FA=ON` (Volta supports Flash Attention), native web UI on port 80
 - Model storage **same path host and CT** via bind mount: host `RaidZ1-6TB` ZFS dataset `RaidZ1-6TB/ai/models` at `/srv/ai/models` → LXC `/srv/ai/models` (`755`, `root` managed, homelab, `zfs xattr,noacl`)
-- LXC 24576 MB RAM (24GB), 12 cores, 64 GiB rootfs on `RaidZ1-6TB` pool, privileged `nesting=1,keyctl=1,fuse=1`, `onboot 1` (single OCuLink slot — workhorse 111, legacy 130/131 retired; 8GB OOM-crashes llama.cpp on 27-35B + 32K KV, V100 VRAM fixed 32GB HBM2)
+- LXC 24576 MB RAM (24GB), 12 cores, 64 GiB rootfs on `RaidZ1-6TB` pool, privileged `nesting=1,keyctl=1,fuse=1`, `onboot 1` (single OCuLink slot — workhorse 120, legacy 130/131 retired; 8GB OOM-crashes llama.cpp on 27-35B + 32K KV, V100 VRAM fixed 32GB HBM2)
 
 > **32GB VRAM:** V100 32GB is single-GPU (unlike K80 2x12GB). llama.cpp uses `CUDA_VISIBLE_DEVICES=0` (single). Context window defaults to 32K (q4_0 KV ≈ 4GB) - 32GB allows 70B Q4 + 32K, or 35B Q4 + 64K. Use `egpu-switch-model.sh` to adjust ctx/KV. MTP draft still experimental on Volta; use `none` or `ngram`.
 
@@ -34,7 +34,7 @@ host `prox01` (192.168.1.10). It is a sibling of `hlh-ai-engine` (ROCm 890M) and
 
 ## Quick Start
 
-Deploy the V100 CUDA AI engine LXC on the Proxmox host (creates 111 at 192.168.1.11, stops/deletes legacy 130/131, installs driver if needed):
+Deploy the V100 CUDA AI engine LXC on the Proxmox host (creates 120 at 192.168.1.20, stops/deletes legacy 130/131, installs driver if needed):
 
 ```bash
 ./deploy-hlh-ai-engine-egpu.sh
@@ -46,8 +46,8 @@ Reconfigure an existing LXC via bash (no recreate, no ansible):
 
 ```bash
 ./configure-hlh-ai-engine-egpu.sh
-./configure-hlh-ai-engine-egpu.sh --host 192.168.1.11
-./configure-hlh-ai-engine-egpu.sh --via-ssh --host 192.168.1.11
+./configure-hlh-ai-engine-egpu.sh --host 192.168.1.20
+./configure-hlh-ai-engine-egpu.sh --via-ssh --host 192.168.1.20
 ```
 
 Switch loaded models (inside LXC after deployment):
@@ -58,7 +58,7 @@ egpu-switch-model.sh
 nvidia-smi -L; nvidia-smi
 ```
 
-> Note: `hlh-ai-engine` (112) and `hlh-ai-engine-egpu` (111) share `/srv/ai/models`. The OCuLink slot is exclusive to 111 (legacy 130/131 retired).
+> Note: `hlh-ai-engine` (112) and `hlh-ai-engine-egpu` (120) share `/srv/ai/models`. The OCuLink slot is exclusive to 120 (legacy 130/131 retired).
 
 ## Deployment Model
 
@@ -71,8 +71,8 @@ Two bash scripts only (no ansible/opentofu):
 
 | Item | Value |
 |------|-------|
-| API endpoint | `http://192.168.1.11:80` |
-| OpenAI-compatible base | `http://192.168.1.11:80/v1/` |
+| API endpoint | `http://192.168.1.20:80` |
+| OpenAI-compatible base | `http://192.168.1.20:80/v1/` |
 | Proxmox host | `prox01` 192.168.1.10 (Debian 13 trixie, kernel `6.14.11-9-pve` pinned, `R580` LTS) |
 | Model storage | `/srv/ai/models` host (RaidZ1-6TB) ↔ `/srv/ai/models` LXC (bind mount `mp0`, same path, 755 root) |
 | GPU device | `/dev/nvidia0` (GV100 c5:00.0) + `nvidiactl` + `nvidia-uvm`/`-uvm-tools` (dynamic `508` for 580) + `nvidia-modeset` (195:254) — `c 195:*` + `c 508:*` |
@@ -80,8 +80,8 @@ Two bash scripts only (no ansible/opentofu):
 | Driver / CUDA | Host `580.65.06` `CUDA 13.0` (R580 last for Volta, CC 7.0); CT `CUDA 12.8` `libnvidia-compute-580`/`nvidia-utils-580` from `ubuntu2404` (12.8 final sm70) |
 | Llama.cpp | `GGML_CUDA=ON` `CMAKE_CUDA_ARCHITECTURES=70` `FA=ON` `FORCE_DMMV/MMQ=ON`, `gcc-13` (`CUDA 12.8` needs `≤13`) |
 | Default model | `Qwen3.8-27B-MTP-Q4_K_M.gguf` (17GB on RaidZ1-6TB, 128K ctx q4_0 MTP FA ON) |
-| LXC | 111, 24576 MB RAM (24GB), 12 cores, 64G rootfs RaidZ1-6TB, `nesting=1,keyctl=1,fuse=1` |
-| Single slot | OCuLink c5:00.0 — exclusive to 111 (legacy 130/131 retired) |
+| LXC | 120, 24576 MB RAM (24GB), 12 cores, 64G rootfs RaidZ1-6TB, `nesting=1,keyctl=1,fuse=1` |
+| Single slot | OCuLink c5:00.0 — exclusive to 120 (legacy 130/131 retired) |
 
 ## Repository Layout
 
@@ -160,4 +160,4 @@ KV cache VRAM estimates (per board, added to model weights):
 
 ## Governance
 
-This repo is forked from `hlh-ai-engine-k80` (LXC 131) but is now CUDA V100 on LXC 111 (192.168.1.11, slot-based ID; legacy 131 retired). Deployments consume pinned commits. K80 was EOL Kepler cc 3.7 - V100 Volta cc 7.0 is significantly faster (FA, Tensor Cores). See `CHANGELOG.md` for host/architecture resume point.
+This repo is forked from `hlh-ai-engine-k80` (LXC 131) but is now CUDA V100 on LXC 120 (192.168.1.20, slot-based ID; legacy 131 retired). Deployments consume pinned commits. K80 was EOL Kepler cc 3.7 - V100 Volta cc 7.0 is significantly faster (FA, Tensor Cores). See `CHANGELOG.md` for host/architecture resume point.

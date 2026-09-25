@@ -5,6 +5,12 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0-egpu] - 2026-09-25
+
+### Changed
+
+- **LXC 111 → 120, IP `192.168.1.11` → `192.168.1.20`** — free `.11` for hlh-docker; `.20` reuses retired vulkan slot. `LXC_ID`, `LXC_IP_CONFIG`, `DEFAULT_HOST`, README runtime contract/API endpoints, and active tasks updated. No GPU/driver/model changes.
+
 ## [2.3.2-egpu] - 2026-09-25
 
 ### Fixed

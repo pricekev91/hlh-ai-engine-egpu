@@ -9,8 +9,8 @@ set -euo pipefail
 # When invoked via pct exec or ssh, the bootstrap logic runs inside the target LXC.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LXC_ID=111
-DEFAULT_HOST="192.168.1.11"
+LXC_ID=120
+DEFAULT_HOST="192.168.1.20"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
 HOST_OVERRIDE=""
 VIA_SSH=false
@@ -23,7 +23,7 @@ Usage:
 	./configure-hlh-ai-engine-egpu.sh --bootstrap-inside   (run inside LXC)
 
 Options:
-  --host <ip>          Override target host (default 192.168.1.11 or LXC 111 via pct if local)
+  --host <ip>          Override target host (default 192.168.1.20 or LXC 120 via pct if local)
   --via-ssh            Force ssh even if pct is available
   --bootstrap-inside   Run bootstrap logic inside LXC (invoked via pct exec, not manually)
   -h, --help           Show this help.
@@ -811,7 +811,7 @@ ${LLAMA_CPP_DIR}/build/bin/llama-server --version 2>&1 | head -5 || true
 systemctl status "$SERVICE_NAME" --no-pager | head -30
 echo ""
 echo "[Bootstrap complete - V100 CUDA $CUDA_MAJOR + $NVIDIA_DRIVER_VERSION sm70 FA ON, 32GB single-GPU]"
-echo "  Web UI: http://<container-ip>:80 (LXC 111 -> 192.168.1.11:80)"
+echo "  Web UI: http://<container-ip>:80 (LXC 120 -> 192.168.1.20:80)"
 echo "  Switch: egpu-switch-model.sh (also /srv/ai/models/egpu-switch-model.sh)"
 echo "  Backend: CUDA sm70 (V100 32GB)"
 echo "  Verify: nvidia-smi -L; nvtop; nvidia-smi dmon"
