@@ -204,6 +204,7 @@ if [[ "$CUDA_MAJOR" == "11.8" ]]; then
 elif [[ "$CUDA_MAJOR" == "12.8" ]]; then
   echo "  Installing CUDA toolkit $CUDA_MAJOR + nvidia userspace $NVIDIA_DRIVER_VERSION (580 branch)..."
   apt-get install -y --allow-downgrades cuda-toolkit-12-8 2>&1 | tail -n 30 || apt-get install -y cuda-toolkit 2>&1 | tail -n 20 || true
+  apt-mark unhold libnvidia-compute-580 nvidia-utils-580 2>/dev/null || true
   apt-get install -y --allow-downgrades libnvidia-compute-580=${NVIDIA_DRIVER_VERSION}-0ubuntu1 2>&1 | tail -n 20 || apt-get install -y --allow-downgrades libnvidia-compute-580 2>&1 | tail -n 20 || true
   apt-get install -y --no-install-recommends nvidia-utils-580=${NVIDIA_DRIVER_VERSION}-0ubuntu1 2>&1 | tail -n 20 || apt-get install -y --no-install-recommends nvidia-utils-580 2>&1 | tail -n 20 || true
   # Fallback if 580 not in repo (Tesla .run host) - try generic 580
@@ -212,6 +213,15 @@ elif [[ "$CUDA_MAJOR" == "12.8" ]]; then
     apt-get install -y --allow-downgrades libnvidia-compute-580 nvidia-utils-580 2>&1 | tail -n 20 || true
   fi
   apt-mark hold libnvidia-compute-580 nvidia-utils-580 cuda-toolkit-12-8 2>&1 | head -n 5 || true
+  # NVML requires userspace to EXACTLY match the host kernel driver. NVIDIA rotates
+  # 580-branch point releases, so an unpinned fallback can install a mismatched
+  # version and silently break the GPU (Driver/library version mismatch).
+  _installed_580="$(dpkg-query -W -f='${Version}' libnvidia-compute-580 2>/dev/null || true)"
+  if [[ -n "$_installed_580" && "$_installed_580" != "${NVIDIA_DRIVER_VERSION}-"* ]]; then
+    echo "  FATAL: libnvidia-compute-580 ${_installed_580} != host driver ${NVIDIA_DRIVER_VERSION} (NVML needs exact match)." >&2
+    echo "         Fix: apt-mark unhold libnvidia-compute-580 nvidia-utils-580 && re-run, or upgrade the host driver to the current 580 tip." >&2
+    exit 1
+  fi
   DRIVER_PKG="580"
 else
   echo "  Installing CUDA toolkit $CUDA_MAJOR + nvidia userspace $NVIDIA_DRIVER_VERSION..."

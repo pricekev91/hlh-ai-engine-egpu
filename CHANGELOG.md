@@ -5,6 +5,12 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.1-egpu] - 2026-09-24
+
+### Fixed
+
+- **Userspace install hardened:** NVIDIA rotated the 580 point release in the CUDA ubuntu2404 repo (580.65.06 → 580.178.04); the old unpinned apt fallback could silently install a userspace that mismatches the host kernel driver → `Failed to initialize NVML: Driver/library version mismatch` (NVML requires userspace == kernel driver version *exactly*). Configure now does `apt-mark unhold` before re-pinning and FATALs after install if `libnvidia-compute-580` version != host driver version. If the repo ever drops 580.65.06 entirely, upgrade the host to the current 580 tip (`NVIDIA-Linux-x86_64-<ver>.run --dkms` — 580.178.04 .run verified downloadable) and re-run both repos. LXC 111 unaffected today (its userspace already matches the host).
+
 ## [2.3.0-egpu] - 2026-09-24
 
 ### Changed
