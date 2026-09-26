@@ -436,6 +436,7 @@ ExecStart=${LLAMA_CPP_DIR}/build/bin/llama-server \\
   --cache-type-k q4_0 \\
   --cache-type-v q4_0 \\
   ${ACTIVE_SPEC} \\
+  --metrics \\
   --parallel 1
 Restart=on-failure
 RestartSec=10
@@ -463,6 +464,7 @@ ExecStart=${LLAMA_CPP_DIR}/build/bin/llama-server \\
   --flash-attn on \\
   --cache-type-k q4_0 \\
   --cache-type-v q4_0 \\
+  --metrics \\
   --parallel 1
 Restart=on-failure
 RestartSec=10
@@ -516,9 +518,11 @@ rewrite_execstart() {
       if (spec_flags != "") {
         print "  --cache-type-v " kv " \\"
         print "  " spec_flags " \\"
+        print "  --metrics \\"
         print "  --parallel 1"
       } else {
         print "  --cache-type-v " kv " \\"
+        print "  --metrics \\"
         print "  --parallel 1"
       }
       in_block=1; next
@@ -785,10 +789,11 @@ echo "  --batch-size 512                       — batch size (prompt processing
 echo "  --flash-attn on                        — Flash Attention optimized kernel (ctx efficiency + speed)"
 echo "  --cache-type-k $NEW_KV / --cache-type-v $NEW_KV — KV cache quantization"
 if [ -n "$SPEC_FLAGS" ]; then echo "  $SPEC_FLAGS — speculative decoding ($NEW_METHOD)"; else echo "  (no --spec-type)                     — standard decoding"; fi
+echo "  --metrics                              — Prometheus metrics endpoint (http://<host>:80/metrics)"
 echo "  --parallel 1                           — parallel slots"
 echo "══════════════════════════════════════════════════════════════════"
 echo " Full reconstructed command:"
-echo "  /opt/llama.cpp/build/bin/llama-server --model $NEW_MODEL --host 0.0.0.0 --port 80 --ctx-size $NEW_CTX -ngl $NEW_NGL --batch-size 512 --flash-attn on --cache-type-k $NEW_KV --cache-type-v $NEW_KV ${SPEC_FLAGS:+$SPEC_FLAGS }--parallel 1"
+echo "  /opt/llama.cpp/build/bin/llama-server --model $NEW_MODEL --host 0.0.0.0 --port 80 --ctx-size $NEW_CTX -ngl $NEW_NGL --batch-size 512 --flash-attn on --cache-type-k $NEW_KV --cache-type-v $NEW_KV ${SPEC_FLAGS:+$SPEC_FLAGS }--metrics --parallel 1"
 echo "══════════════════════════════════════════════════════════════════"
 
 EOS
